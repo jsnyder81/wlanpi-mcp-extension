@@ -1,0 +1,433 @@
+import { promises as fs } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import { type CallToolResult, ToolListChangedNotificationSchema } from "@modelcontextprotocol/sdk/types.js";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { Bridge, type BridgeOptions, MANAGEMENT_TOOLS } from "../../src/bridge.js";
+import { Registry } from "../../src/registry.js";
+import { type MockPi, type MockPiOptions, type MockTool, defaultTools, startMockPi } from "../helpers/mockPi.js";
+
+const MANAGEMENT = MANAGEMENT_TOOLS.map((t) => t.name);
+const cleanup: Array<() => Promise<unknown>> = [];
+let dir: string;
+
+beforeEach(async () => {
+  dir = await fs.mkdtemp(join(tmpdir(), "wlanpi-bridge-"));
+  cleanup.push(() => fs.rm(dir, { recursive: true, force: true }));
+});
+
+afterEach(async () => {
+  while (cleanup.length) await cleanup.pop()!().catch(() => {});
+});
+
+async function pi(options: MockPiOptions = {}): Promise<MockPi> {
+  const mock = await startMockPi(options);
+  cleanup.push(() => mock.close());
+  return mock;
+}
+
+interface Harness {
+  bridge: Bridge;
+  client: Client;
+  registry: Registry;
+  listChanged: () => number;
+  call: (name: string, args?: Record<string, unknown>) => Promise<CallToolResult>;
+  piToolNames: () => Promise<string[]>;
+}
+
+async function harness(config: Partial<BridgeOptions["config"]> = {}): Promise<Harness> {
+  const registry = await Registry.open(dir);
+  const bridge = new Bridge({ registry, config: { callTimeoutMs: 10_000, ...config }, connectionOptions: { connectTimeoutMs: 2000 } });
+  await bridge.init();
+  const client = new Client({ name: "test", version: "0.0.0" });
+  let changes = 0;
+  client.setNotificationHandler(ToolListChangedNotificationSchema, () => {
+    changes++;
+  });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  await bridge.server.connect(serverTransport);
+  await client.connect(clientTransport);
+  cleanup.push(() => bridge.close());
+  return {
+    bridge,
+    client,
+    registry,
+    listChanged: () => changes,
+    call: async (name, args = {}) => (await client.callTool({ name, arguments: args })) as CallToolResult,
+    piToolNames: async () => (await client.listTools()).tools.map((t) => t.name).filter((n) => !MANAGEMENT.includes(n)),
+  };
+}
+
+const textOf = (result: CallToolResult) => result.content.map((c) => (c.type === "text" ? c.text : "")).join("");
+const data = (result: CallToolResult) => {
+  expect(result.isError, textOf(result)).toBeFalsy();
+  return result.structuredContent as Record<string, unknown>;
+};
+const hostOf = (mock: MockPi) => `127.0.0.1:${mock.port}`;
+/** Notifications cross the in-memory transport asynchronously. */
+const settle = () => new Promise((resolve) => setTimeout(resolve, 20));
+
+async function add(h: Harness, mock: MockPi, name: string, token: string | null = mock.token) {
+  return data(await h.call("add_wlanpi", { host: hostOf(mock), name, ...(token ? { token } : {}) }));
+}
+
+describe("adding a WLAN Pi (trust on first use)", () => {
+  it("pins the certificate, checks MCP, saves the device and exposes its tools", async () => {
+    const mock = await pi();
+    const h = await harness();
+
+    const added = await add(h, mock, "lab");
+
+    expect(added).toMatchObject({
+      name: "lab",
+      host: "127.0.0.1",
+      port: mock.port,
+      status: "ready",
+      trust: "pinned",
+      certificate: { fingerprint_sha256: mock.cert.fingerprint256, subject: "CN=wlanpi", self_signed: true },
+      server: { name: "wlanpi-mcp", version: "0.6.17-3" },
+      tool_count: 5,
+      registered_devices: ["lab"],
+    });
+    expect((added.next_steps as string[])[0]).toMatch(/openssl x509 .* -fingerprint -sha256/);
+    expect(h.registry.get("lab")).toMatchObject({ cert_sha256: mock.cert.fingerprint256, token: mock.token, port: mock.port });
+
+    expect(await h.piToolNames()).toEqual(["echo", "fails", "fetch_pcap_file", "get_device_info", "slow"]);
+    // Single device: no device argument needed.
+    const info = await h.call("get_device_info");
+    expect(info.structuredContent).toEqual({ model: "WLAN Pi M4" });
+    expect(mock.requests.every((r) => r.headers.authorization === `Bearer ${mock.token}`)).toBe(true);
+  });
+
+  it("accepts the port as an argument and derives a name from the host", async () => {
+    const mock = await pi();
+    const h = await harness();
+    const added = data(await h.call("add_wlanpi", { host: "127.0.0.1", port: mock.port, token: mock.token }));
+    expect(added.name).toBe("127-0-0-1");
+  });
+
+  it("saves a Pi without a token as needs_token, and set_wlanpi_token completes it", async () => {
+    const mock = await pi();
+    const h = await harness();
+
+    const added = await add(h, mock, "lab", null);
+    expect(added.status).toBe("needs_token");
+    expect((added.next_steps as string[])[1]).toMatch(/No token is set for 'lab'.*getjwt/);
+    expect(await h.piToolNames()).toEqual([]);
+
+    expect(data(await h.call("set_wlanpi_token", { device: "lab", token: "wrong" }))).toMatchObject({ status: "rejected", error: expect.stringMatching(/rejected its token/) });
+    expect(data(await h.call("set_wlanpi_token", { device: "lab", token: mock.token }))).toEqual({ name: "lab", status: "accepted", tool_count: 5 });
+    expect(await h.piToolNames()).toHaveLength(5);
+    expect(JSON.stringify(await h.call("list_wlanpis"))).not.toContain(mock.token);
+  });
+
+  it("uses default_token when add_wlanpi gets no token", async () => {
+    const mock = await pi();
+    const h = await harness({ defaultToken: mock.token });
+    expect((await add(h, mock, "lab", null)).status).toBe("ready");
+  });
+
+  it("refuses bad input and duplicates with clear messages", async () => {
+    const mock = await pi();
+    const h = await harness();
+    await add(h, mock, "lab");
+
+    const cases: Array<[Record<string, unknown>, RegExp]> = [
+      [{ host: `https://${hostOf(mock)}/mcp` }, /looks like a URL/],
+      [{ host: `admin@${hostOf(mock)}` }, /credentials/],
+      [{}, /'host' is required/],
+      [{ host: hostOf(mock), name: "other" }, /already registered as 'lab'/],
+      [{ host: "127.0.0.1:1", name: "lab" }, /A device named 'lab' is already registered/],
+      [{ host: "127.0.0.1:1", name: "Bad Name" }, /Invalid device name/],
+      [{ host: `127.0.0.1:${mock.port}`, port: 1 }, /Give the port once/],
+    ];
+    for (const [args, message] of cases) {
+      const result = await h.call("add_wlanpi", args);
+      expect(result.isError, JSON.stringify(args)).toBe(true);
+      expect(textOf(result)).toMatch(message);
+    }
+    expect(h.registry.names()).toEqual(["lab"]);
+  });
+
+  it("does not save a host that is not answering", async () => {
+    const mock = await pi();
+    await mock.stop();
+    const h = await harness();
+    const result = await h.call("add_wlanpi", { host: hostOf(mock), name: "lab" });
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).toMatch(/^Device 'lab' \(127\.0\.0\.1:\d+\) is unreachable: connection refused/);
+    expect(h.registry.names()).toEqual([]);
+  });
+
+  it("does not save a host that serves TLS but not wlanpi-mcp", async () => {
+    const mock = await pi({ path: "/elsewhere" });
+    const h = await harness();
+    const result = await h.call("add_wlanpi", { host: hostOf(mock), name: "lab", token: mock.token });
+    expect(textOf(result)).toMatch(/no MCP endpoint at \/mcp \(HTTP 404\)/);
+    expect(h.registry.names()).toEqual([]);
+  });
+});
+
+describe("changed certificates", () => {
+  it("refuses calls until the new certificate is explicitly trusted", async () => {
+    const mock = await pi();
+    const h = await harness();
+    await add(h, mock, "lab");
+    const original = mock.cert.fingerprint256;
+    const fresh = await mock.swapCert();
+    await settle();
+
+    let refused = await h.call("echo", { message: "x" });
+    if (!/Certificate for/.test(textOf(refused))) refused = await h.call("echo", { message: "x" });
+    expect(refused.isError).toBe(true);
+    expect(textOf(refused)).toBe(
+      `Certificate for 'lab' changed. Pinned ${original}, presented ${fresh.fingerprint256}. ` +
+        "If this is expected (for example the Pi was reimaged), verify the new fingerprint on the Pi and call trust_wlanpi_cert.",
+    );
+    const callsBefore = mock.calls.length;
+
+    // The old pin, or any other value, is refused and nothing changes.
+    for (const wrong of [original, "AB".repeat(32)]) {
+      const result = await h.call("trust_wlanpi_cert", { device: "lab", fingerprint: wrong });
+      expect(result.isError).toBe(true);
+      expect(textOf(result)).toMatch(/does not match the certificate 'lab' .* presents now .*Nothing was changed/);
+    }
+    expect(h.registry.get("lab")?.cert_sha256).toBe(original);
+    expect(textOf(await h.call("trust_wlanpi_cert", { device: "lab", fingerprint: "not hex" }))).toMatch(/is not a SHA-256 fingerprint/);
+
+    const trusted = data(await h.call("trust_wlanpi_cert", { device: "lab", fingerprint: fresh.fingerprint256.toLowerCase().replaceAll(":", "") }));
+    expect(trusted).toMatchObject({ name: "lab", status: "trusted", previous_fingerprint_sha256: original, certificate: { fingerprint_sha256: fresh.fingerprint256 }, tool_count: 5 });
+    expect(h.registry.get("lab")?.cert_sha256).toBe(fresh.fingerprint256);
+
+    expect(textOf(await h.call("echo", { message: "back" }))).toBe("back");
+    expect(mock.calls.length).toBe(callsBefore + 1);
+
+    expect(data(await h.call("trust_wlanpi_cert", { device: "lab", fingerprint: fresh.fingerprint256 })).status).toBe("unchanged");
+  });
+});
+
+describe("several WLAN Pis", () => {
+  const newerTools = (): MockTool[] => [
+    ...defaultTools().filter((t) => t.name !== "fails" && t.name !== "echo"),
+    {
+      name: "echo",
+      description: "Return the arguments, louder.",
+      inputSchema: { type: "object", properties: { message: { type: "string" }, upper: { type: "boolean" } }, required: ["message"] },
+      handler: (args) => ({ content: [{ type: "text", text: args.upper ? String(args.message).toUpperCase() : String(args.message) }] }),
+    },
+    { name: "scan_wlan", description: "Scan for Wi-Fi networks.", inputSchema: { type: "object", properties: {} }, handler: () => ({ content: [{ type: "text", text: "3 networks" }] }) },
+  ];
+
+  it("merges tools once, newest schema wins, and routes by device", async () => {
+    const older = await pi({ version: "0.6.17-3", token: "tok-old" });
+    const newer = await pi({ version: "0.7.0", token: "tok-new", tools: newerTools() });
+    const h = await harness();
+    await add(h, older, "bench");
+    await add(h, newer, "field");
+
+    const tools = (await h.client.listTools()).tools;
+    const piTools = tools.filter((t) => !MANAGEMENT.includes(t.name));
+    expect(piTools.map((t) => t.name)).toEqual(["echo", "fails", "fetch_pcap_file", "get_device_info", "scan_wlan", "slow"]);
+
+    const echo = piTools.find((t) => t.name === "echo")!;
+    expect(echo.inputSchema.required).toEqual(["device", "message"]);
+    expect(echo.inputSchema.properties?.device).toMatchObject({ enum: ["bench", "field"] });
+    expect(echo.inputSchema.properties).toHaveProperty("upper");
+    expect(echo.description).toBe("Return the arguments, louder.\n\nAvailable on: bench, field.");
+    expect(piTools.find((t) => t.name === "scan_wlan")?.description).toBe("Scan for Wi-Fi networks.\n\nAvailable on: field.");
+    expect(piTools.find((t) => t.name === "get_device_info")?.description).toBe("Get WLAN Pi device information.");
+
+    // The same tool on both devices in one turn.
+    expect(textOf(await h.call("echo", { device: "bench", message: "hi" }))).toBe("hi");
+    expect(textOf(await h.call("echo", { device: "field", message: "hi", upper: true }))).toBe("HI");
+    expect(older.calls).toEqual([{ name: "echo", arguments: { message: "hi" } }]);
+    expect(newer.calls).toEqual([{ name: "echo", arguments: { message: "hi", upper: true } }]);
+    // Each device only ever saw its own token.
+    expect(older.requests.every((r) => r.headers.authorization === "Bearer tok-old")).toBe(true);
+    expect(newer.requests.every((r) => r.headers.authorization === "Bearer tok-new")).toBe(true);
+
+    const missing = await h.call("fails", { device: "field" });
+    expect(missing.isError).toBe(true);
+    expect(textOf(missing)).toBe(
+      "Device 'field' (wlanpi-mcp 0.7.0) does not have the tool 'fails'. It is available on: bench. Updating wlanpi-mcp on 'field' may add it.",
+    );
+    expect(textOf(await h.call("scan_wlan", { device: "bench" }))).toMatch(/^Device 'bench' \(wlanpi-mcp 0\.6\.17-3\) does not have the tool 'scan_wlan'/);
+  });
+
+  it("requires device with two Pis and names the choices", async () => {
+    const a = await pi();
+    const b = await pi();
+    const h = await harness();
+    await add(h, a, "lab");
+    await add(h, b, "field");
+
+    expect(textOf(await h.call("echo", { message: "x" }))).toBe("Tool 'echo' needs a 'device' argument naming the WLAN Pi to use: one of field, lab.");
+    expect(textOf(await h.call("echo", { device: "lad", message: "x" }))).toBe("Unknown device 'lad'. Registered devices: field, lab.");
+    expect(textOf(await h.call("echo", { device: 7, message: "x" }))).toMatch(/must be the name of a WLAN Pi/);
+  });
+
+  it("keeps the tool list the same size however many Pis are added", async () => {
+    const h = await harness();
+    const sizes: number[] = [];
+    for (const name of ["one", "two", "three"]) {
+      const mock = await pi();
+      await add(h, mock, name);
+      sizes.push((await h.client.listTools()).tools.length);
+    }
+    expect(sizes).toEqual([MANAGEMENT.length + 5, MANAGEMENT.length + 5, MANAGEMENT.length + 5]);
+  });
+
+  it("routes with wlanpi_device when a Pi tool has its own device argument", async () => {
+    const mock = await pi({
+      tools: [
+        {
+          name: "bt_pair",
+          description: "Pair a Bluetooth device.",
+          inputSchema: { type: "object", properties: { device: { type: "string", description: "Bluetooth MAC" } }, required: ["device"] },
+          handler: (args) => ({ content: [{ type: "text", text: `paired ${String(args.device)}` }] }),
+        },
+      ],
+    });
+    const other = await pi();
+    const h = await harness();
+    await add(h, mock, "lab");
+    await add(h, other, "field");
+
+    const bt = (await h.client.listTools()).tools.find((t) => t.name === "bt_pair")!;
+    expect(bt.inputSchema.required).toEqual(["wlanpi_device", "device"]);
+    expect(textOf(await h.call("bt_pair", { wlanpi_device: "lab", device: "AA:BB:CC:DD:EE:FF" }))).toBe("paired AA:BB:CC:DD:EE:FF");
+    expect(mock.calls).toEqual([{ name: "bt_pair", arguments: { device: "AA:BB:CC:DD:EE:FF" } }]);
+  });
+});
+
+describe("passthrough", () => {
+  it("returns tool errors, structured content and binary blobs unchanged", async () => {
+    const mock = await pi();
+    const h = await harness();
+    await add(h, mock, "lab");
+
+    expect(await h.call("fails")).toEqual({ content: [{ type: "text", text: "Service 'x' is not in the allowlist" }], isError: true });
+    const blob = await h.call("fetch_pcap_file");
+    const item = blob.content[0];
+    expect(item?.type === "resource" && "blob" in item.resource && Buffer.from(item.resource.blob, "base64")).toEqual(Buffer.from([0x0a, 0x0d, 0x0d, 0x0a, 0, 1, 2, 255]));
+    expect(item?.type === "resource" && item.resource.mimeType).toBe("application/vnd.tcpdump.pcapng");
+  });
+
+  it("forwards progress notifications from a Pi that streams them", async () => {
+    const mock = await pi({ jsonResponse: false });
+    const h = await harness();
+    await add(h, mock, "lab");
+    const progress: number[] = [];
+    const result = await h.client.callTool({ name: "slow", arguments: { ms: 200 } }, undefined, { onprogress: (p) => progress.push(p.progress) });
+    expect((result as CallToolResult).content).toEqual([{ type: "text", text: "waited 200 ms" }]);
+    expect(progress).toEqual([1, 2, 3, 4]);
+  });
+});
+
+describe("offline devices", () => {
+  it("advertises cached tools at startup and fails calls cleanly while a Pi is offline", async () => {
+    const mock = await pi();
+    const first = await harness();
+    await add(first, mock, "lab");
+    await first.bridge.close();
+    await mock.stop();
+
+    const h = await harness();
+    expect(await h.piToolNames()).toEqual(["echo", "fails", "fetch_pcap_file", "get_device_info", "slow"]);
+
+    const result = await h.call("get_device_info");
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).toMatch(/^Device 'lab' \(127\.0\.0\.1:\d+\) is unreachable: connection refused/);
+
+    const listed = data(await h.call("list_wlanpis"));
+    expect(listed.devices).toEqual([
+      expect.objectContaining({ name: "lab", reachable: false, server_version: "0.6.17-3", tool_count: 5, error: expect.stringMatching(/unreachable/) }),
+    ]);
+
+    // Back online: the probe in list_wlanpis clears the backoff and calls work again.
+    await mock.start();
+    expect(data(await h.call("list_wlanpis")).devices).toEqual([expect.objectContaining({ name: "lab", reachable: true, server_version: "0.6.17-3" })]);
+    expect((await h.call("get_device_info")).structuredContent).toEqual({ model: "WLAN Pi M4" });
+  });
+});
+
+describe("registry changes", () => {
+  it("announces tools/list_changed on real changes only", async () => {
+    const a = await pi();
+    const b = await pi();
+    const h = await harness();
+
+    await add(h, a, "lab");
+    await settle();
+    expect(h.listChanged()).toBe(1);
+
+    await h.bridge.refreshAll();
+    await settle();
+    expect(h.listChanged()).toBe(1);
+
+    await add(h, b, "field");
+    await settle();
+    expect(h.listChanged()).toBe(2);
+
+    data(await h.call("remove_wlanpi", { device: "field" }));
+    await settle();
+    expect(h.listChanged()).toBe(3);
+  });
+
+  it("renames and removes devices", async () => {
+    const a = await pi();
+    const b = await pi();
+    const h = await harness();
+    await add(h, a, "lab");
+    await add(h, b, "field");
+
+    expect(data(await h.call("rename_wlanpi", { device: "lab", new_name: "Bench" }))).toEqual({ old_name: "lab", name: "bench", registered_devices: ["bench", "field"] });
+    const echo = (await h.client.listTools()).tools.find((t) => t.name === "echo")!;
+    expect(echo.inputSchema.properties?.device).toMatchObject({ enum: ["bench", "field"] });
+    expect(textOf(await h.call("echo", { device: "bench", message: "renamed" }))).toBe("renamed");
+    expect(a.calls.at(-1)).toEqual({ name: "echo", arguments: { message: "renamed" } });
+    expect(textOf(await h.call("rename_wlanpi", { device: "bench", new_name: "field" }))).toMatch(/already registered/);
+
+    expect(data(await h.call("remove_wlanpi", { device: "field" }))).toEqual({ removed: "field", registered_devices: ["bench"] });
+    expect(textOf(await h.call("remove_wlanpi", { device: "field" }))).toBe("Unknown device 'field'. Registered devices: bench.");
+    data(await h.call("remove_wlanpi", { device: "bench" }));
+    expect(await h.piToolNames()).toEqual([]);
+  });
+
+  it("picks up a device another extension process added", async () => {
+    const mock = await pi();
+    const h = await harness();
+    const elsewhere = await Registry.open(dir);
+    await elsewhere.add({ name: "lab", host: "127.0.0.1", port: mock.port, cert_sha256: mock.cert.fingerprint256, token: mock.token });
+
+    const listed = data(await h.call("list_wlanpis"));
+    expect(listed.devices).toEqual([expect.objectContaining({ name: "lab", reachable: true })]);
+    await h.bridge.refreshDevice("lab");
+    expect(await h.piToolNames()).toHaveLength(5);
+  });
+});
+
+describe("seeded devices", () => {
+  it("adds seed_devices with default_token on start, and only once", async () => {
+    const mock = await pi();
+    const h = await harness({ seedDevices: `lab=${hostOf(mock)}, broken=https://nope`, defaultToken: mock.token });
+    await h.bridge.start();
+
+    expect(h.registry.get("lab")).toMatchObject({ cert_sha256: mock.cert.fingerprint256, token: mock.token });
+    expect(h.registry.names()).toEqual(["lab"]);
+    expect(await h.piToolNames()).toHaveLength(5);
+
+    await h.bridge.start();
+    expect(h.registry.names()).toEqual(["lab"]);
+  });
+
+  it("skips an unreachable seed and keeps starting", async () => {
+    const mock = await pi();
+    await mock.stop();
+    const h = await harness({ seedDevices: `lab=${hostOf(mock)}` });
+    await h.bridge.start();
+    expect(h.registry.names()).toEqual([]);
+  });
+});
