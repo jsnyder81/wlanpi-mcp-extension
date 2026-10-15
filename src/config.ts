@@ -5,7 +5,11 @@ import { type LogLevel, parseLogLevel } from "./log.js";
 /** wlanpi-mcp's TLS listener (nginx on the Pi). The plaintext port is never used. */
 export const DEFAULT_PORT = 8767;
 export const DEFAULT_PATH = "/mcp";
-export const DEFAULT_CALL_TIMEOUT_MS = 60_000;
+/**
+ * Default tool call timeout. Longer than the spec's 60 s on purpose: the Pi's speedtest
+ * waits up to 180 s, and a 60 s capture_scan needs time on top of its capture window.
+ */
+export const DEFAULT_CALL_TIMEOUT_MS = 300_000;
 
 /** Directory name under the per-user config root, kept from the original spec. */
 export const CONFIG_DIR_NAME = "wlanpi-mcp-bridge";

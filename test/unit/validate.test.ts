@@ -13,7 +13,6 @@ describe("parseHost", () => {
     ["fe80::1", { host: "fe80::1" }],
     ["::1", { host: "::1" }],
     ["FE80::ABCD", { host: "fe80::abcd" }],
-    ["fe80::1%en0", { host: "fe80::1%en0" }],
     ["[fe80::1]", { host: "fe80::1" }],
     ["[fe80::1]:8767", { host: "fe80::1", port: 8767 }],
     ["::ffff:10.0.0.1", { host: "::ffff:10.0.0.1" }],
@@ -46,6 +45,8 @@ describe("parseHost", () => {
     ["fe80::1:8767:zz", /IPv6/],
     ["[10.0.0.5]:8767", /IPv6/],
     ["[fe80::1]:99999", /port/],
+    ["fe80::1%en0", /zone IDs/],
+    ["[fe80::1%en0]:8767", /zone IDs/],
   ])("rejects %j", (input, message) => {
     expect(() => parseHost(input)).toThrow(ValidationError);
     expect(() => parseHost(input)).toThrow(message);

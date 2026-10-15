@@ -31,11 +31,11 @@ export function parseHost(input: string): HostPort {
   if (bracketed) {
     const [, addr = "", port] = bracketed;
     if (!isIPv6(addr)) throw new ValidationError(`'${addr}' inside brackets is not a valid IPv6 address.`);
-    return withPort(addr.toLowerCase(), port, raw);
+    return withPort(checkNoZone(addr).toLowerCase(), port, raw);
   }
 
   // A bare IPv6 address has several colons and cannot carry a port unbracketed.
-  if (isIPv6(raw)) return { host: raw.toLowerCase() };
+  if (isIPv6(raw)) return { host: checkNoZone(raw).toLowerCase() };
   if ((raw.match(/:/g) ?? []).length > 1) {
     throw new ValidationError(`Host '${raw}' is not a valid IPv6 address. To give an IPv6 address with a port, use brackets: [fe80::1]:8767.`);
   }
@@ -51,6 +51,14 @@ export function parseHost(input: string): HostPort {
     throw new ValidationError(`'${hostPart}' is not a valid hostname. Use letters, digits, hyphens and dots, e.g. wlanpi-7.local.`);
   }
   return withPort(host, portPart, raw);
+}
+
+/** URLs cannot carry an IPv6 zone ID ("fe80::1%en0"), so the bridge cannot connect to one. */
+function checkNoZone(addr: string): string {
+  if (addr.includes("%")) {
+    throw new ValidationError(`IPv6 zone IDs such as '${addr}' are not supported. Use the Pi's hostname or a non-link-local address.`);
+  }
+  return addr;
 }
 
 function isHostname(host: string): boolean {

@@ -36,7 +36,7 @@ Logs go to stderr only, never stdout. Set `WLANPI_BRIDGE_LOG_LEVEL` to `error`, 
 |---|---|
 | `WLANPI_BRIDGE_CONFIG_DIR` | Override the config directory |
 | `WLANPI_BRIDGE_LOG_LEVEL` | Log verbosity |
-| `WLANPI_BRIDGE_CALL_TIMEOUT_MS` | Tool call timeout (default 60000) |
+| `WLANPI_BRIDGE_CALL_TIMEOUT_MS` | Tool call timeout in milliseconds (default 300000, five minutes) |
 | `WLANPI_BRIDGE_SEED_DEVICES` | Devices to add at startup, e.g. `lab=10.0.0.5, field=wlanpi-7.local` |
 | `WLANPI_BRIDGE_DEFAULT_TOKEN` | Token applied to seeded devices |
 | `WLANPI_BRIDGE_CA_FILE` | CA file to validate against instead of pinning |
