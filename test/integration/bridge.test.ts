@@ -1,77 +1,11 @@
-import { promises as fs } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import { type CallToolResult, ToolListChangedNotificationSchema } from "@modelcontextprotocol/sdk/types.js";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { Bridge, type BridgeOptions, MANAGEMENT_TOOLS } from "../../src/bridge.js";
+import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
+import { describe, expect, it } from "vitest";
 import { Registry } from "../../src/registry.js";
-import { type MockPi, type MockPiOptions, type MockTool, defaultTools, startMockPi } from "../helpers/mockPi.js";
+import { MANAGEMENT, add, data, hostOf, settle, textOf, useBridgeHarness } from "../helpers/bridgeHarness.js";
+import { type MockTool, defaultTools } from "../helpers/mockPi.js";
 
-const MANAGEMENT = MANAGEMENT_TOOLS.map((t) => t.name);
-const cleanup: Array<() => Promise<unknown>> = [];
-let dir: string;
-
-beforeEach(async () => {
-  dir = await fs.mkdtemp(join(tmpdir(), "wlanpi-bridge-"));
-  cleanup.push(() => fs.rm(dir, { recursive: true, force: true }));
-});
-
-afterEach(async () => {
-  while (cleanup.length) await cleanup.pop()!().catch(() => {});
-});
-
-async function pi(options: MockPiOptions = {}): Promise<MockPi> {
-  const mock = await startMockPi(options);
-  cleanup.push(() => mock.close());
-  return mock;
-}
-
-interface Harness {
-  bridge: Bridge;
-  client: Client;
-  registry: Registry;
-  listChanged: () => number;
-  call: (name: string, args?: Record<string, unknown>) => Promise<CallToolResult>;
-  piToolNames: () => Promise<string[]>;
-}
-
-async function harness(config: Partial<BridgeOptions["config"]> = {}): Promise<Harness> {
-  const registry = await Registry.open(dir);
-  const bridge = new Bridge({ registry, config: { callTimeoutMs: 10_000, ...config }, connectionOptions: { connectTimeoutMs: 2000 } });
-  await bridge.init();
-  const client = new Client({ name: "test", version: "0.0.0" });
-  let changes = 0;
-  client.setNotificationHandler(ToolListChangedNotificationSchema, () => {
-    changes++;
-  });
-  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
-  await bridge.server.connect(serverTransport);
-  await client.connect(clientTransport);
-  cleanup.push(() => bridge.close());
-  return {
-    bridge,
-    client,
-    registry,
-    listChanged: () => changes,
-    call: async (name, args = {}) => (await client.callTool({ name, arguments: args })) as CallToolResult,
-    piToolNames: async () => (await client.listTools()).tools.map((t) => t.name).filter((n) => !MANAGEMENT.includes(n)),
-  };
-}
-
-const textOf = (result: CallToolResult) => result.content.map((c) => (c.type === "text" ? c.text : "")).join("");
-const data = (result: CallToolResult) => {
-  expect(result.isError, textOf(result)).toBeFalsy();
-  return result.structuredContent as Record<string, unknown>;
-};
-const hostOf = (mock: MockPi) => `127.0.0.1:${mock.port}`;
-/** Notifications cross the in-memory transport asynchronously. */
-const settle = () => new Promise((resolve) => setTimeout(resolve, 20));
-
-async function add(h: Harness, mock: MockPi, name: string, token: string | null = mock.token) {
-  return data(await h.call("add_wlanpi", { host: hostOf(mock), name, ...(token ? { token } : {}) }));
-}
+const env = useBridgeHarness();
+const { pi, harness } = env;
 
 describe("adding a WLAN Pi (trust on first use)", () => {
   it("pins the certificate, checks MCP, saves the device and exposes its tools", async () => {
@@ -361,19 +295,19 @@ describe("registry changes", () => {
 
     await add(h, a, "lab");
     await settle();
-    expect(h.listChanged()).toBe(1);
+    expect(h.changes).toEqual({ tools: 1, resources: 1, prompts: 1 });
 
     await h.bridge.refreshAll();
     await settle();
-    expect(h.listChanged()).toBe(1);
+    expect(h.changes).toEqual({ tools: 1, resources: 1, prompts: 1 });
 
     await add(h, b, "field");
     await settle();
-    expect(h.listChanged()).toBe(2);
+    expect(h.changes).toEqual({ tools: 2, resources: 2, prompts: 2 });
 
     data(await h.call("remove_wlanpi", { device: "field" }));
     await settle();
-    expect(h.listChanged()).toBe(3);
+    expect(h.changes).toEqual({ tools: 3, resources: 3, prompts: 3 });
   });
 
   it("renames and removes devices", async () => {
@@ -399,7 +333,7 @@ describe("registry changes", () => {
   it("picks up a device another extension process added", async () => {
     const mock = await pi();
     const h = await harness();
-    const elsewhere = await Registry.open(dir);
+    const elsewhere = await Registry.open(env.dir);
     await elsewhere.add({ name: "lab", host: "127.0.0.1", port: mock.port, cert_sha256: mock.cert.fingerprint256, token: mock.token });
 
     const listed = data(await h.call("list_wlanpis"));

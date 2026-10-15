@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Resources and prompts: each Pi's resources and templates under `wlanpi://<device>/...` with reads routed to that Pi; prompts merged once per name with a `device` argument, and a note naming the Pi added to the rendered prompt. `resources/list_changed` and `prompts/list_changed` are sent on real changes.
 - Bridge server: management tools `add_wlanpi`, `list_wlanpis`, `remove_wlanpi`, `rename_wlanpi`, `trust_wlanpi_cert` and `set_wlanpi_token`; one merged copy of every Pi tool with a `device` routing argument (newest schema wins when versions differ); cached tool lists for offline Pis; `seed_devices` added at startup; `tools/list_changed` on real changes only.
 - Device connections: one MCP client per Pi, connected lazily over pinned TLS, with backoff after failed connection attempts (capped at 30 s), connect and call timeouts, and error messages that name the device and the fix (unreachable, changed certificate, missing or expired token, wrong path, wlanpi-mcp down, slow call). Results pass through unchanged.
 - The default tool call timeout is 300 s, not 60 s, because the Pi's speedtest can take 180 s.

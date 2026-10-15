@@ -3,12 +3,33 @@ import type { RequestHandlerExtra } from "@modelcontextprotocol/sdk/shared/proto
 import {
   type CallToolResult,
   CallToolRequestSchema,
+  ErrorCode,
+  GetPromptRequestSchema,
+  type GetPromptResult,
+  ListPromptsRequestSchema,
+  ListResourceTemplatesRequestSchema,
+  ListResourcesRequestSchema,
   ListToolsRequestSchema,
+  McpError,
+  ReadResourceRequestSchema,
+  type ReadResourceResult,
+  type Resource,
+  type ResourceTemplate,
   type ServerNotification,
   type ServerRequest,
   type Tool,
 } from "@modelcontextprotocol/sdk/types.js";
-import { canonicalJson, type MergedTools, mergeTools } from "./catalog.js";
+import {
+  type MergedPrompts,
+  type MergedTools,
+  type ToolRoute,
+  canonicalJson,
+  fromBridgeUri,
+  mergePrompts,
+  mergeResources,
+  mergeTools,
+  toBridgeUri,
+} from "./catalog.js";
 import { type BridgeConfig, DEFAULT_PATH, DEFAULT_PORT } from "./config.js";
 import {
   DEFAULT_PROBE_TIMEOUT_MS,
@@ -38,7 +59,8 @@ const TOUCH_INTERVAL_MS = 60_000;
 const INSTRUCTIONS = `This extension connects to one or more WLAN Pi devices running wlanpi-mcp.
 Register a Pi with add_wlanpi (hostname or IP), and show the user the certificate fingerprint it returns so they can compare it with the Pi.
 Every WLAN Pi tool takes a 'device' argument naming the Pi to run on (see list_wlanpis). With one registered Pi it is optional.
-To run the same tool on several Pis, call it once per device.`;
+To run the same tool on several Pis, call it once per device.
+Each Pi's resources are listed under wlanpi://<device>/..., and prompts take a 'device' argument too.`;
 
 const deviceArg = { type: "string", description: "Name of a registered WLAN Pi (see list_wlanpis)." };
 
@@ -190,7 +212,11 @@ export class Bridge {
   private readonly probeTimeoutMs: number;
   private readonly states = new Map<string, DeviceState>();
   private merged: MergedTools = { tools: [], routes: new Map() };
-  private mergedKey = canonicalJson([]);
+  private prompts: MergedPrompts = { prompts: [], routes: new Map() };
+  private resources: Resource[] = [];
+  private resourceTemplates: ResourceTemplate[] = [];
+  /** Last announced state of each list, to send list_changed only on real changes. */
+  private keys = { tools: canonicalJson([]), resources: canonicalJson([[], []]), prompts: canonicalJson([]) };
   private initialized = false;
   private refreshing = new Map<string, Promise<void>>();
 
@@ -201,7 +227,13 @@ export class Bridge {
     this.connectionOptions = options.connectionOptions;
     this.probeTimeoutMs = options.probeTimeoutMs ?? DEFAULT_PROBE_TIMEOUT_MS;
 
-    this.server = new Server({ name: NAME, version: VERSION }, { capabilities: { tools: { listChanged: true } }, instructions: INSTRUCTIONS });
+    this.server = new Server(
+      { name: NAME, version: VERSION },
+      {
+        capabilities: { tools: { listChanged: true }, resources: { listChanged: true }, prompts: { listChanged: true } },
+        instructions: INSTRUCTIONS,
+      },
+    );
     this.server.oninitialized = () => {
       this.initialized = true;
     };
@@ -218,6 +250,30 @@ export class Bridge {
         return fail(`Tool '${name}' failed unexpectedly: ${err instanceof Error ? err.message : String(err)}`);
       }
     });
+
+    this.server.setRequestHandler(ListResourcesRequestSchema, async () => ({ resources: this.resources }));
+    this.server.setRequestHandler(ListResourceTemplatesRequestSchema, async () => ({ resourceTemplates: this.resourceTemplates }));
+    this.server.setRequestHandler(ReadResourceRequestSchema, async (request, extra) => this.asMcpError(() => this.readResource(request.params.uri, extra)));
+    this.server.setRequestHandler(ListPromptsRequestSchema, async () => ({ prompts: this.prompts.prompts }));
+    this.server.setRequestHandler(GetPromptRequestSchema, async (request, extra) =>
+      this.asMcpError(() => this.getPrompt(request.params.name, request.params.arguments ?? {}, extra)),
+    );
+  }
+
+  /**
+   * Resources and prompts report failures as JSON-RPC errors (they have no isError
+   * result), carrying the same actionable message a tool would.
+   */
+  private async asMcpError<T>(fn: () => Promise<T>): Promise<T> {
+    try {
+      return await fn();
+    } catch (err) {
+      if (err instanceof McpError) throw err;
+      if (err instanceof ValidationError || err instanceof UnknownDeviceError) throw new McpError(ErrorCode.InvalidParams, err.message);
+      if (err instanceof DeviceError) throw new McpError(ErrorCode.InternalError, err.message);
+      this.logger.error("Request failed unexpectedly", err);
+      throw new McpError(ErrorCode.InternalError, `Unexpected error: ${err instanceof Error ? err.message : String(err)}`);
+    }
   }
 
   /** The merged Pi tools, without the management tools. */
@@ -311,16 +367,34 @@ export class Bridge {
   }
 
   private remerge(): void {
-    const devices = [...this.states.entries()]
-      .filter(([, s]) => s.catalog)
-      .map(([device, s]) => ({ device, version: s.catalog!.serverInfo.version, tools: s.catalog!.tools }));
-    this.merged = mergeTools(devices, this.registry.names(), { reserved: RESERVED, logger: this.logger });
-    const key = canonicalJson(this.merged.tools);
-    if (key === this.mergedKey) return;
-    this.mergedKey = key;
-    if (this.initialized) {
-      this.server.sendToolListChanged().catch((err) => this.logger.debug("Could not send tools/list_changed", err));
-    }
+    const registered = this.registry.names();
+    const catalogs = [...this.states.entries()].filter(([, s]) => s.catalog).map(([device, s]) => ({ device, catalog: s.catalog! }));
+    const options = { logger: this.logger };
+
+    this.merged = mergeTools(
+      catalogs.map(({ device, catalog }) => ({ device, version: catalog.serverInfo.version, tools: catalog.tools })),
+      registered,
+      { ...options, reserved: RESERVED },
+    );
+    this.prompts = mergePrompts(
+      catalogs.map(({ device, catalog }) => ({ device, version: catalog.serverInfo.version, prompts: catalog.prompts ?? [] })),
+      registered,
+      options,
+    );
+    ({ resources: this.resources, resourceTemplates: this.resourceTemplates } = mergeResources(
+      catalogs.map(({ device, catalog }) => ({ device, resources: catalog.resources ?? [], resourceTemplates: catalog.resourceTemplates ?? [] })),
+      options,
+    ));
+
+    this.announce("tools", canonicalJson(this.merged.tools), () => this.server.sendToolListChanged());
+    this.announce("resources", canonicalJson([this.resources, this.resourceTemplates]), () => this.server.sendResourceListChanged());
+    this.announce("prompts", canonicalJson(this.prompts.prompts), () => this.server.sendPromptListChanged());
+  }
+
+  private announce(list: keyof Bridge["keys"], key: string, send: () => Promise<void>): void {
+    if (this.keys[list] === key) return;
+    this.keys[list] = key;
+    if (this.initialized) send().catch((err) => this.logger.debug(`Could not send ${list}/list_changed`, err));
   }
 
   private makeConnection(target: DeviceTarget): DeviceConnection {
@@ -360,44 +434,63 @@ export class Bridge {
 
   // ---- Pi tools ----------------------------------------------------------------------
 
-  private async callPiTool(name: string, args: Args, progressToken: string | number | undefined, extra: Extra): Promise<CallToolResult> {
+  /**
+   * Work out which device a tool or prompt request is for: the routing argument, or the
+   * only registered device. A device whose list came from the cache (or was never
+   * fetched) is asked again before being told it lacks the item.
+   */
+  private async resolveDevice(
+    kind: "tool" | "prompt",
+    name: string,
+    args: Args,
+    routes: () => Map<string, ToolRoute>,
+  ): Promise<{ state: DeviceState; device: string; param: string; rest: Args } | { error: string }> {
     const registered = this.registry.names();
-    let route = this.merged.routes.get(name);
+    let route = routes().get(name);
     if (!route) {
-      return fail(
-        registered.length === 0
-          ? `Unknown tool '${name}'. No WLAN Pi is registered yet: add one with add_wlanpi.`
-          : `Unknown tool '${name}'. None of the registered WLAN Pis (${registered.join(", ")}) offers it.`,
-      );
+      return {
+        error:
+          registered.length === 0
+            ? `Unknown ${kind} '${name}'. No WLAN Pi is registered yet: add one with add_wlanpi.`
+            : `Unknown ${kind} '${name}'. None of the registered WLAN Pis (${registered.join(", ")}) offers it.`,
+      };
     }
 
     const { [route.param]: requested, ...rest } = args;
     let device: string;
     if (requested === undefined || requested === null || requested === "") {
-      if (registered.length !== 1) return fail(`Tool '${name}' needs a '${route.param}' argument naming the WLAN Pi to use: one of ${registered.join(", ")}.`);
+      if (registered.length !== 1) return { error: `${kind === "tool" ? "Tool" : "Prompt"} '${name}' needs a '${route.param}' argument naming the WLAN Pi to use: one of ${registered.join(", ")}.` };
       device = registered[0]!;
     } else if (typeof requested !== "string") {
-      return fail(`'${route.param}' must be the name of a WLAN Pi: one of ${registered.join(", ")}.`);
+      return { error: `'${route.param}' must be the name of a WLAN Pi: one of ${registered.join(", ")}.` };
     } else {
       device = requested.trim().toLowerCase();
     }
 
     const state = this.states.get(device);
-    if (!state) return fail(new UnknownDeviceError(device, registered).message);
+    if (!state) return { error: new UnknownDeviceError(device, registered).message };
 
-    // A device we have only a cached (or no) tool list for may have gained the tool:
-    // ask it before saying no.
     if (!route.devices.includes(device) && !state.live) {
       await this.refreshDevice(device);
-      route = this.merged.routes.get(name) ?? route;
+      route = routes().get(name) ?? route;
     }
     if (!route.devices.includes(device)) {
       const version = state.catalog?.serverInfo.version;
-      return fail(
-        `Device '${device}' (wlanpi-mcp ${version ?? "version unknown"}) does not have the tool '${name}'. ` +
+      return {
+        error:
+          `Device '${device}' (wlanpi-mcp ${version ?? "version unknown"}) does not have the ${kind} '${name}'. ` +
           `It is available on: ${route.devices.join(", ")}. Updating wlanpi-mcp on '${device}' may add it.`,
-      );
+      };
     }
+    return { state, device, param: route.param, rest };
+  }
+
+  // ---- Pi tools ----------------------------------------------------------------------
+
+  private async callPiTool(name: string, args: Args, progressToken: string | number | undefined, extra: Extra): Promise<CallToolResult> {
+    const target = await this.resolveDevice("tool", name, args, () => this.merged.routes);
+    if ("error" in target) return fail(target.error);
+    const { state, device, rest } = target;
 
     const connection = await this.connectionFor(state);
     const result = await connection.callTool(name, rest, {
@@ -409,6 +502,35 @@ export class Bridge {
     // The device answered; if its tool list came from the cache, refresh it quietly.
     if (!state.live) void this.refreshDevice(device).catch(() => {});
     return result;
+  }
+
+  // ---- Resources and prompts ---------------------------------------------------------
+
+  private async readResource(uri: string, extra: Extra): Promise<ReadResourceResult> {
+    const target = fromBridgeUri(uri);
+    if (!target) throw new ValidationError(`'${uri}' is not a WLAN Pi resource. Resource URIs look like wlanpi://<device>/device/info.`);
+    const state = this.states.get(target.device);
+    if (!state) throw new UnknownDeviceError(target.device, this.registry.names());
+
+    const result = await (await this.connectionFor(state)).readResource(target.piUri, { signal: extra.signal });
+    // Point returned contents back at bridge URIs, so a follow-up read routes correctly.
+    return { ...result, contents: result.contents.map((c) => ({ ...c, uri: toBridgeUri(target.device, c.uri) ?? c.uri })) };
+  }
+
+  private async getPrompt(name: string, args: Record<string, string>, extra: Extra): Promise<GetPromptResult> {
+    const target = await this.resolveDevice("prompt", name, args, () => this.prompts.routes);
+    if ("error" in target) throw new ValidationError(target.error);
+    const { state, device, rest } = target;
+
+    const result = await (await this.connectionFor(state)).getPrompt(name, rest as Record<string, string>, { signal: extra.signal });
+    // The Pi's prompt names tools without a device; say which Pi this conversation is about.
+    const note = `This is about WLAN Pi '${device}': pass device "${device}" to each WLAN Pi tool you call for it.`;
+    const [first, ...others] = result.messages;
+    const messages: GetPromptResult["messages"] =
+      first?.role === "user" && first.content.type === "text"
+        ? [{ ...first, content: { ...first.content, text: `${note}\n\n${first.content.text}` } }, ...others]
+        : [{ role: "user", content: { type: "text", text: note } }, ...result.messages];
+    return { ...result, messages };
   }
 
   // ---- Management tools --------------------------------------------------------------
