@@ -1,11 +1,14 @@
-// Bundle the extension into one self-contained ESM file, dist/index.js, with every
+// Bundle the extension into one self-contained ESM file, dist/index.mjs, with every
 // production dependency inlined. The .mcpb and the Claude Code plugin both ship only
-// this file, so it must run with no node_modules next to it.
+// this file, so it must run with no node_modules (and no package.json) next to it.
+import { rm } from "node:fs/promises";
 import { build } from "esbuild";
 
+// Start clean so nothing stale (an old bundle name) ends up in the .mcpb.
+await rm("dist", { recursive: true, force: true });
 await build({
   entryPoints: ["src/index.ts"],
-  outfile: "dist/index.js",
+  outfile: "dist/index.mjs",
   bundle: true,
   platform: "node",
   format: "esm",

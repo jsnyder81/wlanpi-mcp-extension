@@ -11,11 +11,15 @@ import { MANAGEMENT_TOOLS } from "../../src/bridge.js";
 import { type MockPi, startMockPi } from "../helpers/mockPi.js";
 
 /**
- * Runs the bundled dist/index.js as a real stdio process, the way Claude Desktop and
+ * Runs the bundled dist/index.mjs as a real stdio process, the way Claude Desktop and
  * Claude Code launch it, to prove the single-file bundle works on its own.
+ *
+ * By default it builds the bundle and copies it out of the repo. Set WLANPI_SMOKE_DIR to
+ * an unpacked .mcpb or an assembled plugin directory to test that instead.
  */
 
 const root = fileURLToPath(new URL("../..", import.meta.url));
+const packaged = process.env.WLANPI_SMOKE_DIR;
 
 let dir: string;
 let mock: MockPi;
@@ -23,15 +27,19 @@ let client: Client;
 let stderr = "";
 
 beforeAll(async () => {
-  execFileSync(process.execPath, [join(root, "esbuild.config.mjs")], { cwd: root, stdio: "ignore" });
   dir = await fs.mkdtemp(join(tmpdir(), "wlanpi-smoke-"));
-  // Copy the bundle out of the repo, laid out as in the .mcpb, so a dependency that was
-  // not bundled cannot be found in the repo's node_modules.
-  const installed = join(dir, "extension");
-  await fs.mkdir(join(installed, "dist"), { recursive: true });
-  await fs.copyFile(join(root, "dist", "index.js"), join(installed, "dist", "index.js"));
-  await fs.copyFile(join(root, "package.json"), join(installed, "package.json"));
-  const entry = join(installed, "dist", "index.js");
+  let entry: string;
+  if (packaged) {
+    entry = join(packaged, "dist", "index.mjs");
+  } else {
+    execFileSync(process.execPath, [join(root, "esbuild.config.mjs")], { cwd: root, stdio: "ignore" });
+    // Copy the bundle alone out of the repo, so a dependency that was not bundled cannot
+    // be found in the repo's node_modules.
+    const installed = join(dir, "extension", "dist");
+    await fs.mkdir(installed, { recursive: true });
+    entry = join(installed, "index.mjs");
+    await fs.copyFile(join(root, "dist", "index.mjs"), entry);
+  }
   mock = await startMockPi();
 
   const transport = new StdioClientTransport({

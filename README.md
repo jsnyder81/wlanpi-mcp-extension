@@ -2,7 +2,7 @@
 
 A local Claude extension that connects Claude Desktop and Claude Code to one or more [WLAN Pi](https://www.wlanpi.com) devices running [wlanpi-mcp](https://github.com/WLAN-Pi/wlanpi-mcp).
 
-> **Status:** early development (Phase 0 scaffold). Not ready for use yet.
+> **Status:** pre-release. Feature complete for v1 and tested against a simulated Pi; validation on real WLAN Pi hardware is in progress.
 
 ## What and Why
 
@@ -18,10 +18,37 @@ Each WLAN Pi runs `wlanpi-mcp`, an MCP server served over HTTPS on the Pi with a
 
 ## Installation
 
-Coming soon: a `.mcpb` bundle for Claude Desktop and a plugin marketplace for Claude Code.
+### Claude Desktop
 
-- **Claude Desktop** runs the extension on its own bundled Node.js, so nothing else needs to be installed.
-- **Claude Code** runs the extension with `node`, so Node.js 22.19 or later must be on your `PATH`.
+1. Download `wlanpi-mcp-extension-<version>.mcpb` from the [latest release](https://github.com/jsnyder81/wlanpi-mcp-extension/releases/latest).
+2. Open it, or drag it onto Claude Desktop's **Settings > Extensions** page, and choose **Install**.
+
+All settings are optional, so you can skip them and add Pis by asking Claude:
+
+| Setting | Use |
+|---|---|
+| WLAN Pis to add at startup | `name=host` pairs, e.g. `lab=10.0.0.5, field=wlanpi-7.local` |
+| wlanpi-core token | Token for Pis added without one, so it never appears in a conversation |
+| CA certificate | Only if your Pis use certificates from your own CA |
+
+Claude Desktop runs the extension on its own bundled Node.js, so nothing else needs to be installed.
+
+### Claude Code
+
+In Claude Code, run:
+
+```text
+/plugin install wlanpi-mcp-extension --marketplace jsnyder81/wlanpi-mcp-extension
+```
+
+On Claude Code versions before 2.1.275, add the marketplace first:
+
+```text
+/plugin marketplace add jsnyder81/wlanpi-mcp-extension
+/plugin install wlanpi-mcp-extension@wlanpi
+```
+
+No configuration is needed. The plugin runs the extension with `node`, so Node.js 22.19 or later must be on your `PATH`. The optional settings above are read from environment variables instead (`WLANPI_BRIDGE_SEED_DEVICES`, `WLANPI_BRIDGE_DEFAULT_TOKEN`, `WLANPI_BRIDGE_CA_FILE`; see [TROUBLESHOOTING.md](TROUBLESHOOTING.md#logging)) if they are set in the shell that starts Claude Code.
 
 ## Usage
 
@@ -72,10 +99,20 @@ Requires Node.js 22.19 or later.
 
 ```bash
 npm install
-npm run check   # lint, typecheck, tests
-npm run build   # bundle to dist/index.js
-npm run pack    # build and pack wlanpi-mcp-extension.mcpb
+npm run check    # lint, typecheck, tests
+npm run build    # bundle to dist/index.mjs
+npm run pack     # build and pack wlanpi-mcp-extension.mcpb
+npm run plugin   # build and assemble the Claude Code plugin in build/plugin
 ```
+
+Try a local build in Claude Code with `claude --plugin-dir build/plugin`.
+
+### Releasing
+
+1. Bump the version in `package.json`, `manifest.json`, `plugin/.claude-plugin/plugin.json` and `src/version.ts` (a test fails if they differ), and update `CHANGELOG.md`.
+2. Merge to `main`, then tag it: `git tag v0.2.0 && git push origin v0.2.0`.
+
+The release workflow checks, packs and smoke-tests both packages, attaches the `.mcpb` to a GitHub Release, and pushes the assembled plugin to the `release` branch that the marketplace installs from. Claude Code updates the plugin when the version in `plugin.json` changes.
 
 See [WLAN-Pi/developers](https://github.com/WLAN-Pi/developers) for WLAN Pi contribution guidelines. Debugging notes live in [TROUBLESHOOTING.md](TROUBLESHOOTING.md).
 

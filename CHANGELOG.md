@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Packaging: full MCPB manifest with optional settings (seed devices, default token, CA file); Claude Code plugin and the `wlanpi` marketplace, installed from a `release` branch so `main` never carries the bundle; a release workflow that publishes both; CI smoke-tests the unpacked `.mcpb` and the assembled plugin on Linux and Windows. The bundle is now `dist/index.mjs` and needs no `package.json` beside it.
 - Resources and prompts: each Pi's resources and templates under `wlanpi://<device>/...` with reads routed to that Pi; prompts merged once per name with a `device` argument, and a note naming the Pi added to the rendered prompt. `resources/list_changed` and `prompts/list_changed` are sent on real changes.
 - Bridge server: management tools `add_wlanpi`, `list_wlanpis`, `remove_wlanpi`, `rename_wlanpi`, `trust_wlanpi_cert` and `set_wlanpi_token`; one merged copy of every Pi tool with a `device` routing argument (newest schema wins when versions differ); cached tool lists for offline Pis; `seed_devices` added at startup; `tools/list_changed` on real changes only.
 - Device connections: one MCP client per Pi, connected lazily over pinned TLS, with backoff after failed connection attempts (capped at 30 s), connect and call timeouts, and error messages that name the device and the fix (unreachable, changed certificate, missing or expired token, wrong path, wlanpi-mcp down, slow call). Results pass through unchanged.

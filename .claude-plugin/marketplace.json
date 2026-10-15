@@ -1,0 +1,22 @@
+{
+  "name": "wlanpi",
+  "description": "Claude Code plugins for WLAN Pi devices.",
+  "owner": {
+    "name": "Jake Snyder",
+    "url": "https://github.com/jsnyder81"
+  },
+  "plugins": [
+    {
+      "name": "wlanpi-mcp-extension",
+      "displayName": "WLAN Pi",
+      "description": "Connect Claude Code to one or more WLAN Pi devices running wlanpi-mcp, with certificate pinning and one tool list for all your Pis.",
+      "category": "networking",
+      "tags": ["wlanpi", "wifi", "mcp"],
+      "source": {
+        "source": "github",
+        "repo": "jsnyder81/wlanpi-mcp-extension",
+        "ref": "release"
+      }
+    }
+  ]
+}
