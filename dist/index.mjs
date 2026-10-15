@@ -61595,6 +61595,7 @@ function loadConfig(env = process.env, platform = process.platform, home = homed
     logLevel,
     callTimeoutMs,
     seedDevices: setting(env, "WLANPI_BRIDGE_SEED_DEVICES"),
+    tokens: setting(env, "WLANPI_BRIDGE_TOKENS"),
     defaultToken: setting(env, "WLANPI_BRIDGE_DEFAULT_TOKEN"),
     caFile: setting(env, "WLANPI_BRIDGE_CA_FILE"),
     warnings
@@ -64056,7 +64057,7 @@ function createFetch(dispatcher) {
 
 // src/version.ts
 var NAME = "wlanpi-mcp-extension";
-var VERSION = "0.1.0";
+var VERSION = "0.1.1";
 
 // src/device.ts
 var DEFAULT_PROBE_TIMEOUT_MS = 2e3;
@@ -64520,16 +64521,38 @@ function parseSeedDevices(value) {
   }
   return result;
 }
+function parseTokens(value) {
+  const result = { byName: /* @__PURE__ */ new Map(), errors: [] };
+  if (!value) return result;
+  const entries = value.split(/[\s,;]+/).filter(Boolean);
+  entries.forEach((entry, index) => {
+    const eq = entry.indexOf("=");
+    if (eq === -1) {
+      if (result.default) result.errors.push(`Ignoring token entry ${index + 1}: only one token may be given without a name; use name=token for the others.`);
+      else result.default = entry;
+      return;
+    }
+    const name = entry.slice(0, eq).trim().toLowerCase();
+    const token = entry.slice(eq + 1).trim();
+    if (!isValidName(name)) result.errors.push(`Ignoring token entry ${index + 1}: '${name}' is not a valid device name.`);
+    else if (!token) result.errors.push(`Ignoring token entry ${index + 1}: no token after '${name}='.`);
+    else if (result.byName.has(name)) result.errors.push(`Ignoring token entry ${index + 1}: '${name}' already has a token.`);
+    else result.byName.set(name, token);
+  });
+  return result;
+}
 
 // src/bridge.ts
 var PI_CERT_COMMAND = "openssl x509 -in /etc/nginx/ssl/self-signed-wlanpi.cert -noout -fingerprint -sha256";
 var TOKEN_COMMAND = "sudo getjwt claude";
 var TOUCH_INTERVAL_MS = 6e4;
+var STARTUP_WAIT_MS = 8e3;
 var INSTRUCTIONS = `This extension connects to one or more WLAN Pi devices running wlanpi-mcp.
 Register a Pi with add_wlanpi (hostname or IP), and show the user the certificate fingerprint it returns so they can compare it with the Pi.
 Every WLAN Pi tool takes a 'device' argument naming the Pi to run on (see list_wlanpis). With one registered Pi it is optional.
 To run the same tool on several Pis, call it once per device.
-Each Pi's resources are listed under wlanpi://<device>/..., and prompts take a 'device' argument too.`;
+Each Pi's resources are listed under wlanpi://<device>/..., and prompts take a 'device' argument too.
+If a Pi's tools are missing from your tool list (some clients only read it when the extension starts), use list_wlanpi_tools to see them and call_wlanpi_tool to run one.`;
 var deviceArg = { type: "string", description: "Name of a registered WLAN Pi (see list_wlanpis)." };
 var MANAGEMENT_TOOLS = [
   {
@@ -64594,6 +64617,34 @@ var MANAGEMENT_TOOLS = [
       required: ["device", "token"]
     },
     annotations: { title: "Set a WLAN Pi's token", readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true }
+  },
+  {
+    name: "list_wlanpi_tools",
+    title: "List a WLAN Pi's tools",
+    description: "List the tools a WLAN Pi offers, with a short summary of each and whether it is read-only or destructive. Give 'tool' to get one tool's full description and input schema. Use this with call_wlanpi_tool when the Pi's tools are not in your tool list.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        device: { ...deviceArg, description: "Name of a registered WLAN Pi. Optional when only one is registered." },
+        tool: { type: "string", description: "Name of one tool to describe in full." }
+      }
+    },
+    annotations: { title: "List a WLAN Pi's tools", readOnlyHint: true, openWorldHint: true }
+  },
+  {
+    name: "call_wlanpi_tool",
+    title: "Run a WLAN Pi tool",
+    description: "Run any tool a WLAN Pi offers, by name, and return its result unchanged. Use it when the tool you need is not in your tool list (see list_wlanpi_tools for names and arguments). Some Pi tools change the device (for example reboot_device, stop_service): check the tool's read_only and destructive flags from list_wlanpi_tools and ask the user before running a destructive one.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        device: { ...deviceArg, description: "Name of a registered WLAN Pi. Optional when only one is registered." },
+        tool: { type: "string", description: "Name of the Pi tool to run, e.g. get_device_info." },
+        arguments: { type: "object", description: "Arguments for the Pi tool, as listed in its input schema.", additionalProperties: true }
+      },
+      required: ["tool"]
+    },
+    annotations: { title: "Run a WLAN Pi tool", readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true }
   }
 ];
 var RESERVED = new Set(MANAGEMENT_TOOLS.map((t) => t.name));
@@ -64647,12 +64698,20 @@ var Bridge = class {
   keys = { tools: canonicalJson([]), resources: canonicalJson([[], []]), prompts: canonicalJson([]) };
   initialized = false;
   refreshing = /* @__PURE__ */ new Map();
+  tokens;
+  startupWaitMs;
+  startupReady;
+  startedAt = 0;
   constructor(options) {
     this.registry = options.registry;
     this.config = options.config;
     this.logger = options.logger ?? silentLogger;
     this.connectionOptions = options.connectionOptions;
     this.probeTimeoutMs = options.probeTimeoutMs ?? DEFAULT_PROBE_TIMEOUT_MS;
+    this.startupWaitMs = options.startupWaitMs ?? STARTUP_WAIT_MS;
+    this.tokens = parseTokens(this.config.tokens);
+    this.tokens.default ??= this.config.defaultToken;
+    for (const error62 of this.tokens.errors) this.logger.warn(error62);
     this.server = new Server(
       { name: NAME, version: VERSION },
       {
@@ -64663,11 +64722,16 @@ var Bridge = class {
     this.server.oninitialized = () => {
       this.initialized = true;
     };
-    this.server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: [...MANAGEMENT_TOOLS, ...this.merged.tools] }));
+    this.server.setRequestHandler(ListToolsRequestSchema, async () => {
+      await this.untilStarted();
+      return { tools: [...MANAGEMENT_TOOLS, ...this.merged.tools] };
+    });
     this.server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
       const { name, arguments: args = {} } = request.params;
       try {
-        return RESERVED.has(name) ? await this.callManagementTool(name, args) : await this.callPiTool(name, args, request.params._meta?.progressToken, extra);
+        const progressToken = request.params._meta?.progressToken;
+        if (name === "call_wlanpi_tool") return await this.callAnyPiTool(args, progressToken, extra);
+        return RESERVED.has(name) ? await this.callManagementTool(name, args) : await this.callPiTool(name, args, progressToken, extra);
       } catch (err) {
         if (err instanceof ValidationError || err instanceof DeviceError || err instanceof UnknownDeviceError || err instanceof DuplicateDeviceError) {
           return fail(err.message);
@@ -64676,10 +64740,19 @@ var Bridge = class {
         return fail(`Tool '${name}' failed unexpectedly: ${err instanceof Error ? err.message : String(err)}`);
       }
     });
-    this.server.setRequestHandler(ListResourcesRequestSchema, async () => ({ resources: this.resources }));
-    this.server.setRequestHandler(ListResourceTemplatesRequestSchema, async () => ({ resourceTemplates: this.resourceTemplates }));
+    this.server.setRequestHandler(ListResourcesRequestSchema, async () => {
+      await this.untilStarted();
+      return { resources: this.resources };
+    });
+    this.server.setRequestHandler(ListResourceTemplatesRequestSchema, async () => {
+      await this.untilStarted();
+      return { resourceTemplates: this.resourceTemplates };
+    });
     this.server.setRequestHandler(ReadResourceRequestSchema, async (request, extra) => this.asMcpError(() => this.readResource(request.params.uri, extra)));
-    this.server.setRequestHandler(ListPromptsRequestSchema, async () => ({ prompts: this.prompts.prompts }));
+    this.server.setRequestHandler(ListPromptsRequestSchema, async () => {
+      await this.untilStarted();
+      return { prompts: this.prompts.prompts };
+    });
     this.server.setRequestHandler(
       GetPromptRequestSchema,
       async (request, extra) => this.asMcpError(() => this.getPrompt(request.params.name, request.params.arguments ?? {}, extra))
@@ -64704,17 +64777,63 @@ var Bridge = class {
   get piTools() {
     return this.merged.tools;
   }
-  /** Load the registry and cached catalogs. No network, so startup is instant. */
+  /**
+   * Load the registry and cached catalogs, and apply tokens from settings. No network, so
+   * startup is instant.
+   */
   async init() {
     await this.sync();
+    await this.applyConfiguredTokens();
   }
   /**
-   * Network work after startup: add seeded devices, then refresh every catalog. Runs in
-   * the background in production; tests await it.
+   * Network work after startup: add seeded devices and fetch Pis with no cached catalog
+   * (the first list requests wait for this, up to startupWaitMs), then refresh every
+   * catalog. Runs in the background in production; tests await it.
    */
   async start() {
-    await this.seed();
+    this.startedAt = Date.now();
+    this.startupReady = (async () => {
+      await this.seed();
+      const uncached = [...this.states.entries()].filter(([, s]) => !s.catalog).map(([name]) => name);
+      await Promise.all(uncached.map((name) => this.refreshDevice(name).catch(() => {
+      })));
+    })();
+    await this.startupReady;
     await this.refreshAll();
+  }
+  /** Wait for startup work, but never longer than startupWaitMs after start(). */
+  async untilStarted() {
+    if (!this.startupReady) return;
+    const remaining = this.startupWaitMs - (Date.now() - this.startedAt);
+    if (remaining <= 0) return;
+    let timer;
+    await Promise.race([this.startupReady.catch(() => {
+    }), new Promise((resolve) => timer = setTimeout(resolve, remaining))]);
+    clearTimeout(timer);
+  }
+  /** The token to use for a device that was not given one. */
+  tokenFor(name) {
+    return this.tokens.byName.get(name) ?? this.tokens.default ?? null;
+  }
+  /**
+   * Settings win over stored tokens, so renewing an expired token is: paste the new one
+   * into the settings and restart. A named token replaces that device's token. A token
+   * without a name replaces the token when exactly one Pi is registered, and otherwise
+   * only fills in Pis that have none (it cannot know which Pi it belongs to).
+   */
+  async applyConfiguredTokens() {
+    const records = this.registry.list();
+    let changed = false;
+    for (const record2 of records) {
+      const named = this.tokens.byName.get(record2.name);
+      const fallback = this.tokens.default && (records.length === 1 || !record2.token) ? this.tokens.default : void 0;
+      const wanted = named ?? fallback;
+      if (!wanted || wanted === record2.token) continue;
+      await this.registry.update(record2.name, { token: wanted });
+      this.logger.info(`Using the token from settings for '${record2.name}'.`);
+      changed = true;
+    }
+    if (changed) await this.sync();
   }
   async close() {
     await Promise.all([...this.states.values()].map((s) => s.connection?.close()));
@@ -64841,48 +64960,56 @@ var Bridge = class {
     return this.connectionOptions?.connectTimeoutMs ?? DEFAULT_CONNECT_TIMEOUT_MS;
   }
   // ---- Pi tools ----------------------------------------------------------------------
-  /**
-   * Work out which device a tool or prompt request is for: the routing argument, or the
-   * only registered device. A device whose list came from the cache (or was never
-   * fetched) is asked again before being told it lacks the item.
-   */
-  async resolveDevice(kind, name, args, routes) {
+  /** The device a request names, or the only registered one when it names none. */
+  pickDevice(what, param, requested) {
     const registered = this.registry.names();
-    let route = routes().get(name);
+    if (registered.length === 0) return { error: `No WLAN Pi is registered yet: add one with add_wlanpi.` };
+    let device;
+    if (requested === void 0 || requested === null || requested === "") {
+      if (registered.length !== 1) return { error: `${what} needs a '${param}' argument naming the WLAN Pi to use: one of ${registered.join(", ")}.` };
+      device = registered[0];
+    } else if (typeof requested !== "string") {
+      return { error: `'${param}' must be the name of a WLAN Pi: one of ${registered.join(", ")}.` };
+    } else {
+      device = requested.trim().toLowerCase();
+    }
+    const state = this.states.get(device);
+    return state ? { state, device } : { error: new UnknownDeviceError(device, registered).message };
+  }
+  /**
+   * Check that a device offers a tool or prompt. A device whose list came from the cache
+   * (or was never fetched) is asked again before being told it lacks the item.
+   */
+  async ensureOffers(kind, name, device, state, routes) {
+    if (!routes().get(name)?.devices.includes(device) && !state.live) await this.refreshDevice(device);
+    const route = routes().get(name);
+    if (route?.devices.includes(device)) return void 0;
+    const version2 = state.catalog?.serverInfo.version;
+    return `Device '${device}' (wlanpi-mcp ${version2 ?? "version unknown"}) does not have the ${kind} '${name}'.` + (route ? ` It is available on: ${route.devices.join(", ")}. Updating wlanpi-mcp on '${device}' may add it.` : "");
+  }
+  /** Resolve a routed tool or prompt request: which device, and the arguments for it. */
+  async resolveDevice(kind, name, args, routes) {
+    const route = routes().get(name);
     if (!route) {
+      const registered = this.registry.names();
       return {
         error: registered.length === 0 ? `Unknown ${kind} '${name}'. No WLAN Pi is registered yet: add one with add_wlanpi.` : `Unknown ${kind} '${name}'. None of the registered WLAN Pis (${registered.join(", ")}) offers it.`
       };
     }
     const { [route.param]: requested, ...rest } = args;
-    let device;
-    if (requested === void 0 || requested === null || requested === "") {
-      if (registered.length !== 1) return { error: `${kind === "tool" ? "Tool" : "Prompt"} '${name}' needs a '${route.param}' argument naming the WLAN Pi to use: one of ${registered.join(", ")}.` };
-      device = registered[0];
-    } else if (typeof requested !== "string") {
-      return { error: `'${route.param}' must be the name of a WLAN Pi: one of ${registered.join(", ")}.` };
-    } else {
-      device = requested.trim().toLowerCase();
-    }
-    const state = this.states.get(device);
-    if (!state) return { error: new UnknownDeviceError(device, registered).message };
-    if (!route.devices.includes(device) && !state.live) {
-      await this.refreshDevice(device);
-      route = routes().get(name) ?? route;
-    }
-    if (!route.devices.includes(device)) {
-      const version2 = state.catalog?.serverInfo.version;
-      return {
-        error: `Device '${device}' (wlanpi-mcp ${version2 ?? "version unknown"}) does not have the ${kind} '${name}'. It is available on: ${route.devices.join(", ")}. Updating wlanpi-mcp on '${device}' may add it.`
-      };
-    }
-    return { state, device, param: route.param, rest };
+    const picked = this.pickDevice(`${kind === "tool" ? "Tool" : "Prompt"} '${name}'`, route.param, requested);
+    if ("error" in picked) return picked;
+    const missing = await this.ensureOffers(kind, name, picked.device, picked.state, routes);
+    return missing ? { error: missing } : { ...picked, rest };
   }
   // ---- Pi tools ----------------------------------------------------------------------
   async callPiTool(name, args, progressToken, extra) {
     const target = await this.resolveDevice("tool", name, args, () => this.merged.routes);
     if ("error" in target) return fail(target.error);
-    const { state, device, rest } = target;
+    return this.runPiTool(target.state, target.device, name, target.rest, progressToken, extra);
+  }
+  /** Call a tool on one device and return its result, with a fix appended on a core 401. */
+  async runPiTool(state, device, name, rest, progressToken, extra) {
     const connection = await this.connectionFor(state);
     const result = await connection.callTool(name, rest, {
       signal: extra.signal,
@@ -64932,6 +65059,8 @@ ${first.content.text}` } }, ...others] : [{ role: "user", content: { type: "text
         return ok(await this.trustCert(args));
       case "set_wlanpi_token":
         return ok(await this.setToken(args));
+      case "list_wlanpi_tools":
+        return ok(await this.listPiTools(args));
       default:
         return fail(`Unknown tool '${name}'.`);
     }
@@ -64952,7 +65081,7 @@ ${first.content.text}` } }, ...others] : [{ role: "user", content: { type: "text
     const nameArg = optionalString(args, "name");
     const name = nameArg ? normalizeName(nameArg) : nameFromHost(host, this.registry.names());
     if (this.registry.get(name)) throw new DuplicateDeviceError(name);
-    const token = optionalString(args, "token") ?? this.config.defaultToken ?? null;
+    const token = optionalString(args, "token") ?? this.tokenFor(name);
     const probeTarget = { name, host, port, path: DEFAULT_PATH, token, trust: { kind: "pin", fingerprint: "00".repeat(32) } };
     let cert;
     try {
@@ -65130,6 +65259,58 @@ ${first.content.text}` } }, ...others] : [{ role: "user", content: { type: "text
       const error62 = err instanceof DeviceError ? err : void 0;
       return error62?.kind === "auth" ? { name, status: "rejected", error: error62.message } : { name, status: "saved_untested", error: err instanceof Error ? err.message : String(err) };
     }
+  }
+  /** A device's catalog, fetched now if there is none yet. */
+  async catalogFor(device, state) {
+    if (!state.catalog) await this.refreshDevice(device);
+    if (!state.catalog) throw new ValidationError(`The tools of '${device}' are not known yet.`);
+    return state.catalog;
+  }
+  async listPiTools(args) {
+    const picked = this.pickDevice("list_wlanpi_tools", "device", args.device);
+    if ("error" in picked) throw new ValidationError(picked.error);
+    const { state, device } = picked;
+    const catalog = await this.catalogFor(device, state);
+    const toolName = optionalString(args, "tool");
+    const flags = (tool) => ({ read_only: tool.annotations?.readOnlyHint === true, destructive: tool.annotations?.destructiveHint === true });
+    if (toolName) {
+      const tool = catalog.tools.find((t) => t.name === toolName);
+      if (!tool) throw new ValidationError(`'${device}' has no tool '${toolName}'. Call list_wlanpi_tools without 'tool' to see them all.`);
+      return { device, tool: { name: tool.name, description: tool.description ?? "", ...flags(tool), inputSchema: tool.inputSchema, ...tool.outputSchema ? { outputSchema: tool.outputSchema } : {} } };
+    }
+    const summary = (text = "") => {
+      const first = text.split(/\n\s*\n/)[0].replace(/\s+/g, " ").trim();
+      return first.length > 200 ? `${first.slice(0, 197)}...` : first;
+    };
+    return {
+      device,
+      server_version: catalog.serverInfo.version,
+      source: state.live ? "live" : "cache",
+      count: catalog.tools.length,
+      tools: catalog.tools.map((tool) => ({
+        name: tool.name,
+        summary: summary(tool.description),
+        ...flags(tool),
+        arguments: Object.keys(tool.inputSchema.properties ?? {}),
+        required: tool.inputSchema.required ?? []
+      }))
+    };
+  }
+  /** call_wlanpi_tool: run any Pi tool by name, whether or not the client lists it. */
+  async callAnyPiTool(args, progressToken, extra) {
+    const tool = requireString(args, "tool");
+    const toolArgs = args.arguments ?? {};
+    if (typeof toolArgs !== "object" || Array.isArray(toolArgs) || toolArgs === null) throw new ValidationError("'arguments' must be an object of the Pi tool's arguments.");
+    if (RESERVED.has(tool)) throw new ValidationError(`'${tool}' is one of the extension's own tools: call it directly.`);
+    const picked = this.pickDevice("call_wlanpi_tool", "device", args.device);
+    if ("error" in picked) return fail(picked.error);
+    const { state, device } = picked;
+    const offers = (catalog) => catalog?.tools.some((t) => t.name === tool) ?? false;
+    if (!offers(state.catalog) && !state.live) await this.refreshDevice(device);
+    if (!offers(state.catalog)) {
+      return fail(`Device '${device}' (wlanpi-mcp ${state.catalog?.serverInfo.version ?? "version unknown"}) does not have the tool '${tool}'. See list_wlanpi_tools.`);
+    }
+    return this.runPiTool(state, device, tool, toolArgs, progressToken, extra);
   }
   async seed() {
     const { devices, errors } = parseSeedDevices(this.config.seedDevices);
@@ -65387,8 +65568,8 @@ logger.info(`Starting wlanpi-mcp-extension ${VERSION}; config in ${config2.confi
 var registry2 = await Registry.open(config2.configDir, { logger });
 var bridge = new Bridge({ registry: registry2, config: config2, logger });
 await bridge.init();
-await bridge.server.connect(new StdioServerTransport());
 bridge.start().catch((err) => logger.error("Background startup failed", err));
+await bridge.server.connect(new StdioServerTransport());
 var closing = false;
 var shutdown = () => {
   if (closing) return;

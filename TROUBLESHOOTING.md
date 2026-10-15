@@ -28,6 +28,10 @@ openssl x509 -in /etc/nginx/ssl/self-signed-wlanpi.cert -noout -fingerprint -sha
 
 If it matches the "presented" fingerprint in the error, ask Claude to call `trust_wlanpi_cert` with that fingerprint. If it does not match, something else is answering at that address: do not re-trust it.
 
+## Pi Tools Missing in Claude Desktop
+
+Claude Desktop reads the extension's tool list once, when the extension starts, and does not pick up changes after that. The extension waits up to 8 seconds at startup for Pis listed in **WLAN Pis to add at startup**, so those are included. A Pi added later, with `add_wlanpi` in a conversation, gets its tools listed after the extension restarts: turn it off and on in **Settings → Extensions**, or restart Claude Desktop. Until then, Claude can still use every Pi tool through `list_wlanpi_tools` and `call_wlanpi_tool`.
+
 ## Token Rejected or Missing
 
 wlanpi-mcp only checks that a token is present; wlanpi-core checks whether it is valid, when a tool calls it. So a Pi lists its tools even with a bad token. The extension therefore verifies each token with a quick read-only call (`get_device_info`) when you add a Pi, when you set a token, and in `list_wlanpis` (`token_valid`).
@@ -56,5 +60,6 @@ Logs go to stderr only, never stdout. Set `WLANPI_BRIDGE_LOG_LEVEL` to `error`, 
 | `WLANPI_BRIDGE_LOG_LEVEL` | Log verbosity |
 | `WLANPI_BRIDGE_CALL_TIMEOUT_MS` | Tool call timeout in milliseconds (default 300000, five minutes) |
 | `WLANPI_BRIDGE_SEED_DEVICES` | Devices to add at startup, e.g. `lab=10.0.0.5, field=wlanpi-7.local` |
-| `WLANPI_BRIDGE_DEFAULT_TOKEN` | Token applied to seeded devices |
+| `WLANPI_BRIDGE_TOKENS` | Tokens as `name=token` pairs, or one token for a single Pi. Replaces stored tokens at every start |
+| `WLANPI_BRIDGE_DEFAULT_TOKEN` | Older single default token, still read when `WLANPI_BRIDGE_TOKENS` has no unnamed token |
 | `WLANPI_BRIDGE_CA_FILE` | CA file to validate against instead of pinning |

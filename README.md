@@ -27,7 +27,7 @@ All settings are optional, so you can skip them and add Pis by asking Claude:
 | Setting | Use |
 |---|---|
 | WLAN Pis to add at startup | `name=host` pairs, e.g. `lab=10.0.0.5, field=wlanpi-7.local` |
-| wlanpi-core token | Token for Pis added without one, so it never appears in a conversation |
+| wlanpi-core tokens | One token per Pi as `name=token` pairs, e.g. `lab=eyJ..., field=eyJ...`, so tokens never appear in a conversation. With one Pi, the token alone is enough |
 | CA certificate | Only if your Pis use certificates from your own CA |
 
 Claude Desktop runs the extension on its own bundled Node.js, so nothing else needs to be installed.
@@ -47,7 +47,7 @@ On Claude Code versions before 2.1.275, add the marketplace first:
 /plugin install wlanpi-mcp-extension@wlanpi
 ```
 
-No configuration is needed. The plugin runs the extension with `node`, so Node.js 22.19 or later must be on your `PATH`. The optional settings above are read from environment variables instead (`WLANPI_BRIDGE_SEED_DEVICES`, `WLANPI_BRIDGE_DEFAULT_TOKEN`, `WLANPI_BRIDGE_CA_FILE`; see [TROUBLESHOOTING.md](TROUBLESHOOTING.md#logging)) if they are set in the shell that starts Claude Code.
+No configuration is needed. The plugin runs the extension with `node`, so Node.js 22.19 or later must be on your `PATH`. The optional settings above are read from environment variables instead (`WLANPI_BRIDGE_SEED_DEVICES`, `WLANPI_BRIDGE_TOKENS`, `WLANPI_BRIDGE_CA_FILE`; see [TROUBLESHOOTING.md](TROUBLESHOOTING.md#logging)) if they are set in the shell that starts Claude Code.
 
 ## Usage
 
@@ -61,8 +61,10 @@ Ask Claude in plain language. The extension's own tools manage the list of Pis:
 | `rename_wlanpi` | Change the name a Pi is known by |
 | `trust_wlanpi_cert` | Re-pin a Pi's certificate after it legitimately changed |
 | `set_wlanpi_token` | Set or replace a Pi's wlanpi-core token |
+| `list_wlanpi_tools` | List the tools a Pi offers, or describe one in full |
+| `call_wlanpi_tool` | Run any Pi tool by name |
 
-Every wlanpi-mcp tool is listed once, with a `device` argument naming the Pi to run on. With one Pi registered, `device` is optional. If Pis run different wlanpi-mcp versions, a tool's description lists which Pis offer it.
+Every wlanpi-mcp tool is listed once, with a `device` argument naming the Pi to run on. Claude Desktop only reads this list when the extension starts, so a Pi added during a conversation has its tools offered after the extension restarts; until then Claude reaches them through `list_wlanpi_tools` and `call_wlanpi_tool`. With one Pi registered, `device` is optional. If Pis run different wlanpi-mcp versions, a tool's description lists which Pis offer it.
 
 Each Pi's resources appear under its own prefix: `device://info` on the Pi named `lab` is `wlanpi://lab/device/info`. Prompts such as `health_check` are listed once and take a `device` argument like tools do.
 
@@ -74,9 +76,11 @@ wlanpi-mcp requires a wlanpi-core token. On the Pi, run:
 sudo getjwt claude
 ```
 
-Use the `access_token` it prints, either in `add_wlanpi` or later with `set_wlanpi_token`. Tokens expire (7 days by default); when one does, tool calls say so and tell you to run the command again.
+Each Pi issues its own tokens. Put each Pi's `access_token` in the extension's **wlanpi-core tokens** setting as `name=token` pairs, using the same names as in **WLAN Pis to add at startup** (or as shown by `list_wlanpis`). Tokens in the setting replace stored ones every time the extension starts.
 
-A token passed to a tool is visible in your Claude conversation. To keep it out, set the extension's default token in its settings instead.
+Tokens expire (7 days by default). When one does, `list_wlanpis` shows `token_valid: false` and tool calls say so. Run `sudo getjwt claude` on that Pi again, paste the new token into the setting, and restart the extension (turn it off and on in **Settings → Extensions**).
+
+You can also give a token to `add_wlanpi` or `set_wlanpi_token`, but it is then visible in your conversation.
 
 ### Verifying the Certificate
 
@@ -153,7 +157,7 @@ Try a local build in Claude Code with `claude --plugin-dir build/plugin`.
 
 ### Releasing
 
-1. Bump the version in `package.json`, `manifest.json`, `plugin/.claude-plugin/plugin.json` and `src/version.ts` (a test fails if they differ), and update `CHANGELOG.md`.
+1. Bump the version in `package.json` (and `package-lock.json`), `manifest.json`, `plugin/.claude-plugin/plugin.json` and `src/version.ts` (a test fails if they differ), and update `CHANGELOG.md`.
 2. Merge to `main`, then tag it: `git tag v0.2.0 && git push origin v0.2.0`.
 
 The release workflow checks, packs and smoke-tests both packages, attaches the `.mcpb` to a GitHub Release, and pushes the assembled plugin to the `release` branch that the marketplace installs from. Claude Code updates the plugin when the version in `plugin.json` changes.

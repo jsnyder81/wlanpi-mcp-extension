@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.1.1 (2026-10-15)
+
+Fixes found by running 0.1.0 in Claude Desktop.
+
+- Claude Desktop reads an extension's tool list once, when the extension starts, and ignores later `tools/list_changed` notifications. A Pi added a few seconds after startup (from `seed_devices`, or with `add_wlanpi` in a conversation) never had its tools offered. Two fixes:
+  - New tools `list_wlanpi_tools` and `call_wlanpi_tool` are always present and run any Pi tool by name, so a Pi is usable even when the client's tool list is stale.
+  - The first tool, resource and prompt lists wait up to 8 seconds for seeded Pis and Pis with no cached tool list, so Desktop's one reading includes them.
+- One token per Pi: the token setting is now `tokens`, taking `name=token` pairs (a single token alone still works for one Pi). Tokens from settings replace stored ones every time the extension starts, so renewing an expired token is: paste it into the settings and restart. Desktop users who set the old single token need to enter it again in the new field; `WLANPI_BRIDGE_DEFAULT_TOKEN` is still read.
+
 ## 0.1.0 (2026-10-15)
 
 First release, tested against a WLAN Pi M4 running wlanpi-mcp 1.30.0.
