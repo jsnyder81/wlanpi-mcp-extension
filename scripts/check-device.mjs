@@ -6,7 +6,7 @@
 //   WLANPI_TOKEN=<jwt> node scripts/check-device.mjs <host[:port]> [--entry dist/index.mjs]
 //   node scripts/check-device.mjs <host[:port]> --token-file <path>
 //
-// The token is passed to the extension as WLANPI_BRIDGE_DEFAULT_TOKEN, never as an
+// The token is passed to the extension as WLANPI_BRIDGE_TOKENS, never as an
 // argument, and the script checks it never appears in the extension's logs. A temporary
 // config directory is used, so your real devices.json is untouched.
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
@@ -50,7 +50,7 @@ async function start() {
   const transport = new StdioClientTransport({
     command: process.execPath,
     args: [entry],
-    env: { ...getDefaultEnvironment(), WLANPI_BRIDGE_CONFIG_DIR: configDir, WLANPI_BRIDGE_LOG_LEVEL: "debug", WLANPI_BRIDGE_DEFAULT_TOKEN: token },
+    env: { ...getDefaultEnvironment(), WLANPI_BRIDGE_CONFIG_DIR: configDir, WLANPI_BRIDGE_LOG_LEVEL: "debug", WLANPI_BRIDGE_TOKENS: `${name}=${token}` },
     stderr: "pipe",
   });
   transport.stderr?.on("data", (chunk) => (stderr += chunk.toString()));
@@ -99,6 +99,12 @@ try {
     const result = await call(client, tool);
     report(!result.isError, `${tool}`, `${Date.now() - started} ms: ${short(text(result))}`);
   }
+
+  // The fallback tools, for clients that never see the Pi's tools in their list.
+  const fallbackList = await call(client, "list_wlanpi_tools");
+  report(!fallbackList.isError && fallbackList.structuredContent?.count === info.tool_count, "list_wlanpi_tools lists the Pi's tools", `${fallbackList.structuredContent?.count} tools`);
+  const fallbackCall = await call(client, "call_wlanpi_tool", { tool: "get_device_info" });
+  report(!fallbackCall.isError, "call_wlanpi_tool runs a Pi tool by name", short(text(fallbackCall)));
 
   // Resources and prompts.
   const resources = (await client.listResources()).resources;

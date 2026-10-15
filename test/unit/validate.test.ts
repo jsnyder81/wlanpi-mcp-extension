@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { ValidationError } from "../../src/errors.js";
-import { isValidName, nameFromHost, normalizeName, parseHost, parsePort, parseSeedDevices } from "../../src/validate.js";
+import { isValidName, nameFromHost, normalizeName, parseHost, parsePort, parseSeedDevices, parseTokens } from "../../src/validate.js";
 
 describe("parseHost", () => {
   it.each([
@@ -131,5 +131,49 @@ describe("parseSeedDevices", () => {
     expect(result.errors[0]).toMatch(/Skipped seed device 'Bad Name=10\.0\.0\.6'.*Invalid device name/);
     expect(result.errors[1]).toMatch(/URL/);
     expect(result.errors[2]).toMatch(/'lab' is used more than once/);
+  });
+});
+
+describe("parseTokens", () => {
+  const JWT_A = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJhIn0.sig-a_1";
+  const JWT_B = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJiIn0.sig-b_2";
+
+  it("returns nothing for an empty value", () => {
+    expect(parseTokens(undefined)).toEqual({ byName: new Map(), errors: [] });
+  });
+
+  it("takes a single token as the default", () => {
+    expect(parseTokens(`  ${JWT_A} `)).toEqual({ byName: new Map(), default: JWT_A, errors: [] });
+  });
+
+  it("parses name=token pairs separated by commas, semicolons, spaces or newlines", () => {
+    const result = parseTokens(`lab=${JWT_A}, Field=${JWT_B}\nother=${JWT_A};x=${JWT_B}`);
+    expect([...result.byName]).toEqual([
+      ["lab", JWT_A],
+      ["field", JWT_B],
+      ["other", JWT_A],
+      ["x", JWT_B],
+    ]);
+    expect(result.default).toBeUndefined();
+    expect(result.errors).toEqual([]);
+  });
+
+  it("allows one unnamed default alongside pairs", () => {
+    const result = parseTokens(`lab=${JWT_A}, ${JWT_B}`);
+    expect(result.byName.get("lab")).toBe(JWT_A);
+    expect(result.default).toBe(JWT_B);
+  });
+
+  it("skips bad entries without ever echoing a token", () => {
+    const result = parseTokens(`${JWT_A}, ${JWT_B}, Bad_Name=${JWT_A}, empty=, lab=${JWT_A}, lab=${JWT_B}`);
+    expect(result.default).toBe(JWT_A);
+    expect([...result.byName]).toEqual([["lab", JWT_A]]);
+    expect(result.errors).toEqual([
+      "Ignoring token entry 2: only one token may be given without a name; use name=token for the others.",
+      "Ignoring token entry 3: 'bad_name' is not a valid device name.",
+      "Ignoring token entry 4: no token after 'empty='.",
+      "Ignoring token entry 6: 'lab' already has a token.",
+    ]);
+    expect(result.errors.join(" ")).not.toMatch(/eyJ/);
   });
 });

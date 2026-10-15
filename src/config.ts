@@ -20,7 +20,9 @@ export interface BridgeConfig {
   callTimeoutMs: number;
   /** Raw `seed_devices` value; parsed with parseSeedDevices. */
   seedDevices?: string;
-  /** Token applied to seeded devices. */
+  /** Raw tokens setting: `name=token` pairs and/or one default token; parsed with parseTokens. */
+  tokens?: string;
+  /** Legacy single default token (WLANPI_BRIDGE_DEFAULT_TOKEN), used when `tokens` has no default. */
   defaultToken?: string;
   /** CA file used instead of TOFU pinning for every device without its own. */
   caFile?: string;
@@ -80,6 +82,7 @@ export function loadConfig(env: Env = process.env, platform: NodeJS.Platform = p
     logLevel,
     callTimeoutMs,
     seedDevices: setting(env, "WLANPI_BRIDGE_SEED_DEVICES"),
+    tokens: setting(env, "WLANPI_BRIDGE_TOKENS"),
     defaultToken: setting(env, "WLANPI_BRIDGE_DEFAULT_TOKEN"),
     caFile: setting(env, "WLANPI_BRIDGE_CA_FILE"),
     warnings,
