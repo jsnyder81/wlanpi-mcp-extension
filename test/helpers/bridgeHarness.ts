@@ -50,9 +50,9 @@ export function useBridgeHarness() {
     return mock;
   }
 
-  async function harness(config: Partial<BridgeOptions["config"]> = {}): Promise<Harness> {
+  async function harness(config: Partial<BridgeOptions["config"]> = {}, options: Pick<BridgeOptions, "startupWaitMs"> = {}): Promise<Harness> {
     const registry = await Registry.open(dir);
-    const bridge = new Bridge({ registry, config: { callTimeoutMs: 10_000, ...config }, connectionOptions: { connectTimeoutMs: 2000 } });
+    const bridge = new Bridge({ registry, config: { callTimeoutMs: 10_000, ...config }, connectionOptions: { connectTimeoutMs: 2000 }, ...options });
     await bridge.init();
     const client = new Client({ name: "test", version: "0.0.0" });
     const changes = { tools: 0, resources: 0, prompts: 0 };

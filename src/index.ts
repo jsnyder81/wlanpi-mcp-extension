@@ -14,13 +14,14 @@ logger.info(`Starting wlanpi-mcp-extension ${VERSION}; config in ${config.config
 const registry = await Registry.open(config.configDir, { logger });
 const bridge = new Bridge({ registry, config, logger });
 
-// Registry and cached tool lists only: no network, so Claude gets a tool list at once.
+// Registry, cached tool lists and tokens from settings: no network.
 await bridge.init();
-await bridge.server.connect(new StdioServerTransport());
 
-// Seeding and catalog refreshes run in the background and announce changes with
-// notifications/tools/list_changed.
+// Seeding and catalog refreshes run in the background. Start them before connecting:
+// the first tool list waits briefly for seeded Pis, because some clients (Claude
+// Desktop) only read it once and ignore notifications/tools/list_changed.
 bridge.start().catch((err) => logger.error("Background startup failed", err));
+await bridge.server.connect(new StdioServerTransport());
 
 let closing = false;
 const shutdown = () => {

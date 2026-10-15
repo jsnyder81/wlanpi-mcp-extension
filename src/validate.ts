@@ -153,3 +153,39 @@ export function parseSeedDevices(value: string | undefined): SeedParseResult {
   }
   return result;
 }
+
+export interface TokenSettings {
+  /** Tokens for named devices. */
+  byName: Map<string, string>;
+  /** A token given without a name: used for Pis that have no named token. */
+  default?: string;
+  /** One message per entry that was skipped. Never contains a token. */
+  errors: string[];
+}
+
+/**
+ * Parse the tokens setting: `name=token` pairs separated by commas, semicolons or
+ * whitespace, e.g. `lab=eyJ..., field=eyJ...`. A single entry without a name is the
+ * default token. wlanpi-core tokens are JWTs, which never contain `=`, `,` or spaces,
+ * so the pairs cannot be misread. Messages name entries by position, never by value.
+ */
+export function parseTokens(value: string | undefined): TokenSettings {
+  const result: TokenSettings = { byName: new Map(), errors: [] };
+  if (!value) return result;
+  const entries = value.split(/[\s,;]+/).filter(Boolean);
+  entries.forEach((entry, index) => {
+    const eq = entry.indexOf("=");
+    if (eq === -1) {
+      if (result.default) result.errors.push(`Ignoring token entry ${index + 1}: only one token may be given without a name; use name=token for the others.`);
+      else result.default = entry;
+      return;
+    }
+    const name = entry.slice(0, eq).trim().toLowerCase();
+    const token = entry.slice(eq + 1).trim();
+    if (!isValidName(name)) result.errors.push(`Ignoring token entry ${index + 1}: '${name}' is not a valid device name.`);
+    else if (!token) result.errors.push(`Ignoring token entry ${index + 1}: no token after '${name}='.`);
+    else if (result.byName.has(name)) result.errors.push(`Ignoring token entry ${index + 1}: '${name}' already has a token.`);
+    else result.byName.set(name, token);
+  });
+  return result;
+}

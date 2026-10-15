@@ -2,7 +2,7 @@
   "manifest_version": "0.4",
   "name": "wlanpi-mcp-extension",
   "display_name": "WLAN Pi",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Connect Claude to one or more WLAN Pi devices running wlanpi-mcp.",
   "long_description": "Lets Claude use your WLAN Pis for Wi-Fi diagnostics: device info, services, Wi-Fi scans, packet capture, profiler, Bluetooth and more, through each Pi's wlanpi-mcp server. Add a Pi by asking Claude, for example \"add my WLAN Pi at 10.0.0.5\". Each Pi's self-signed certificate is pinned on first use, and a changed certificate is refused until you confirm it. With several Pis, every tool takes a device argument naming the Pi to use. Runs on your computer and talks only to the Pis you add.",
   "author": {
@@ -17,27 +17,61 @@
   "documentation": "https://github.com/jsnyder81/wlanpi-mcp-extension#readme",
   "support": "https://github.com/jsnyder81/wlanpi-mcp-extension/issues",
   "license": "BSD-3-Clause",
-  "keywords": ["wlanpi", "wifi", "wireless", "network", "diagnostics"],
+  "keywords": [
+    "wlanpi",
+    "wifi",
+    "wireless",
+    "network",
+    "diagnostics"
+  ],
   "server": {
     "type": "node",
     "entry_point": "dist/index.mjs",
     "mcp_config": {
       "command": "node",
-      "args": ["${__dirname}/dist/index.mjs"],
+      "args": [
+        "${__dirname}/dist/index.mjs"
+      ],
       "env": {
         "WLANPI_BRIDGE_SEED_DEVICES": "${user_config.seed_devices}",
-        "WLANPI_BRIDGE_DEFAULT_TOKEN": "${user_config.default_token}",
+        "WLANPI_BRIDGE_TOKENS": "${user_config.tokens}",
         "WLANPI_BRIDGE_CA_FILE": "${user_config.ca_file}"
       }
     }
   },
   "tools": [
-    { "name": "add_wlanpi", "description": "Register a WLAN Pi by hostname or IP and pin its certificate." },
-    { "name": "list_wlanpis", "description": "List registered WLAN Pis and whether each answers." },
-    { "name": "remove_wlanpi", "description": "Forget a registered WLAN Pi." },
-    { "name": "rename_wlanpi", "description": "Rename a registered WLAN Pi." },
-    { "name": "trust_wlanpi_cert", "description": "Re-pin a WLAN Pi's certificate after it legitimately changed." },
-    { "name": "set_wlanpi_token", "description": "Set or replace a WLAN Pi's wlanpi-core token." }
+    {
+      "name": "add_wlanpi",
+      "description": "Register a WLAN Pi by hostname or IP and pin its certificate."
+    },
+    {
+      "name": "list_wlanpis",
+      "description": "List registered WLAN Pis and whether each answers."
+    },
+    {
+      "name": "remove_wlanpi",
+      "description": "Forget a registered WLAN Pi."
+    },
+    {
+      "name": "rename_wlanpi",
+      "description": "Rename a registered WLAN Pi."
+    },
+    {
+      "name": "trust_wlanpi_cert",
+      "description": "Re-pin a WLAN Pi's certificate after it legitimately changed."
+    },
+    {
+      "name": "set_wlanpi_token",
+      "description": "Set or replace a WLAN Pi's wlanpi-core token."
+    },
+    {
+      "name": "list_wlanpi_tools",
+      "description": "List the tools a WLAN Pi offers."
+    },
+    {
+      "name": "call_wlanpi_tool",
+      "description": "Run any WLAN Pi tool by name."
+    }
   ],
   "tools_generated": true,
   "prompts_generated": true,
@@ -48,10 +82,10 @@
       "description": "Optional. Comma-separated name=host pairs, e.g. lab=10.0.0.5, field=wlanpi-7.local. Each is added once, pinning its certificate on first contact. You can also just ask Claude to add a Pi.",
       "required": false
     },
-    "default_token": {
+    "tokens": {
       "type": "string",
-      "title": "wlanpi-core token",
-      "description": "Optional. Token used for Pis added without one, so it never appears in your conversation. Get it on the Pi with: sudo getjwt claude",
+      "title": "wlanpi-core tokens",
+      "description": "Optional. One token per Pi as name=token pairs separated by commas, e.g. lab=eyJ..., field=eyJ... (names as in the list above, or as shown by list_wlanpis). With a single Pi, the token alone is enough. Get a token on each Pi with: sudo getjwt claude. Tokens here replace stored ones every time the extension starts, so to renew an expired token, paste the new one here.",
       "sensitive": true,
       "required": false
     },
@@ -63,7 +97,11 @@
     }
   },
   "compatibility": {
-    "platforms": ["darwin", "linux", "win32"],
+    "platforms": [
+      "darwin",
+      "linux",
+      "win32"
+    ],
     "runtimes": {
       "node": ">=22.19.0"
     }
