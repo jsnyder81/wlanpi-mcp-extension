@@ -10,12 +10,10 @@ Each WLAN Pi runs `wlanpi-mcp`, an MCP server served over HTTPS on the Pi with a
 
 ## Features
 
-Planned for v1:
-
 - One install, any number of WLAN Pis.
 - Trust on first use (TOFU) certificate pinning per device, with an explicit re-trust step when a certificate changes.
 - One aggregated tool list with a `device` routing argument, so the tool list does not grow with device count.
-- Pi resources exposed as `wlanpi://<device>/...` and prompts with a `device` argument.
+- Planned: Pi resources exposed as `wlanpi://<device>/...` and prompts with a `device` argument.
 - Cached tool lists, so a Pi that is offline at startup still has its tools listed and calls to it fail with a clear error.
 
 ## Installation
@@ -27,7 +25,40 @@ Coming soon: a `.mcpb` bundle for Claude Desktop and a plugin marketplace for Cl
 
 ## Usage
 
-Coming soon.
+Ask Claude in plain language. The extension's own tools manage the list of Pis:
+
+| Tool | What it does |
+|---|---|
+| `add_wlanpi` | Register a Pi by hostname or IP, pin its certificate, check wlanpi-mcp answers |
+| `list_wlanpis` | Show registered Pis, whether each answers, its version and when it was last seen |
+| `remove_wlanpi` | Forget a Pi, its pinned certificate and its token |
+| `rename_wlanpi` | Change the name a Pi is known by |
+| `trust_wlanpi_cert` | Re-pin a Pi's certificate after it legitimately changed |
+| `set_wlanpi_token` | Set or replace a Pi's wlanpi-core token |
+
+Every wlanpi-mcp tool is listed once, with a `device` argument naming the Pi to run on. With one Pi registered, `device` is optional. If Pis run different wlanpi-mcp versions, a tool's description lists which Pis offer it.
+
+### Getting a Token
+
+wlanpi-mcp requires a wlanpi-core token. On the Pi, run:
+
+```bash
+sudo getjwt claude
+```
+
+Use the `access_token` it prints, either in `add_wlanpi` or later with `set_wlanpi_token`. Tokens expire (7 days by default); when one does, tool calls say so and tell you to run the command again.
+
+A token passed to a tool is visible in your Claude conversation. To keep it out, set the extension's default token in its settings instead.
+
+### Verifying the Certificate
+
+`add_wlanpi` returns the Pi's certificate fingerprint. Compare it with the Pi:
+
+```bash
+openssl x509 -in /etc/nginx/ssl/self-signed-wlanpi.cert -noout -fingerprint -sha256
+```
+
+If a Pi is reimaged it gets a new certificate, and the extension refuses to connect until you confirm the new fingerprint with `trust_wlanpi_cert`.
 
 ## Quick Local Test
 
