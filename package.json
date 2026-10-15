@@ -1,0 +1,48 @@
+{
+  "name": "wlanpi-mcp-extension",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Local Claude extension that connects Claude Desktop and Claude Code to one or more WLAN Pi devices running wlanpi-mcp.",
+  "keywords": [
+    "wlanpi",
+    "mcp",
+    "claude",
+    "wifi"
+  ],
+  "homepage": "https://github.com/jsnyder81/wlanpi-mcp-extension",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/jsnyder81/wlanpi-mcp-extension.git"
+  },
+  "license": "BSD-3-Clause",
+  "author": "Jake Snyder",
+  "type": "module",
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "scripts": {
+    "build": "node esbuild.config.mjs",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint .",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "pack": "npm run build && mcpb validate manifest.json && mcpb pack . wlanpi-mcp-extension.mcpb",
+    "check": "npm run lint && npm run typecheck && npm test"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.1",
+    "undici": "^8.12.1",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@anthropic-ai/mcpb": "^2.1.2",
+    "@eslint/js": "^10.0.1",
+    "@types/node": "^22.20.5",
+    "esbuild": "^0.28.2",
+    "eslint": "^10.12.0",
+    "selfsigned": "^5.5.0",
+    "typescript": "^6.0.3",
+    "typescript-eslint": "^8.71.2",
+    "vitest": "^4.1.11"
+  }
+}

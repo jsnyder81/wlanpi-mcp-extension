@@ -1,0 +1,31 @@
+{
+  "manifest_version": "0.4",
+  "name": "wlanpi-mcp-extension",
+  "display_name": "WLAN Pi",
+  "version": "0.1.0",
+  "description": "Connect Claude to one or more WLAN Pi devices running wlanpi-mcp.",
+  "author": {
+    "name": "Jake Snyder"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/jsnyder81/wlanpi-mcp-extension"
+  },
+  "homepage": "https://github.com/jsnyder81/wlanpi-mcp-extension",
+  "license": "BSD-3-Clause",
+  "server": {
+    "type": "node",
+    "entry_point": "dist/index.js",
+    "mcp_config": {
+      "command": "node",
+      "args": ["${__dirname}/dist/index.js"],
+      "env": {}
+    }
+  },
+  "compatibility": {
+    "platforms": ["darwin", "linux", "win32"],
+    "runtimes": {
+      "node": ">=22.19.0"
+    }
+  }
+}
