@@ -2,7 +2,6 @@
 
 A local Claude extension that connects Claude Desktop and Claude Code to one or more [WLAN Pi](https://www.wlanpi.com) devices running [wlanpi-mcp](https://github.com/WLAN-Pi/wlanpi-mcp).
 
-> **Status:** pre-release. Feature complete for v1 and tested against a simulated Pi; validation on real WLAN Pi hardware is in progress.
 
 ## What and Why
 
@@ -91,7 +90,52 @@ If a Pi is reimaged it gets a new certificate, and the extension refuses to conn
 
 ## Quick Local Test
 
-Coming soon: a manual checklist for testing against a real WLAN Pi.
+### Automated Check
+
+`scripts/check-device.mjs` drives the built extension over stdio against a real Pi, the way Claude runs it. It adds the Pi (pinning its certificate and verifying the token), lists it, calls a few read-only tools, reads a resource, renders a prompt, and checks that a bad token and a wrong pinned certificate are both refused. It changes nothing on the Pi and uses a temporary config directory.
+
+```bash
+npm run build
+ssh wlanpi.local 'sudo getjwt --no-color claude'   # copy the access_token into a file
+node scripts/check-device.mjs wlanpi.local --token-file ./token
+```
+
+Add `--entry <dir>/dist/index.mjs` to check an unpacked `.mcpb` or an assembled plugin instead.
+
+### Manual Checklist
+
+Run through these in Claude Desktop with the `.mcpb`, and again in Claude Code with the plugin:
+
+1. Install with no settings. The six management tools are listed.
+2. Ask Claude to "add my WLAN Pi at `<host>`" with a token. It shows the certificate fingerprint and `token_verified: true`.
+3. On the Pi, run `openssl x509 -in /etc/nginx/ssl/self-signed-wlanpi.cert -noout -fingerprint -sha256` and confirm it matches.
+4. Ask for the Pi's device info, then for a Wi-Fi scan. The scan completes without a timeout.
+5. Ask Claude to read the `wlanpi://<name>/device/info` resource, and to run the `health_check` prompt.
+6. Start a capture with `start_pcap_file`, stop it, and fetch it with `fetch_pcap_file`. The file comes back intact.
+7. With a second Pi added, ask for device info from both in one request. The tool list does not grow.
+8. Set an invalid token with `set_wlanpi_token`. It is reported as rejected, and a tool call says to run `sudo getjwt claude`. Set the real token again.
+9. Reimage a Pi or regenerate its certificate. Calls are refused with both fingerprints until `trust_wlanpi_cert` is called with the new one.
+10. Power a Pi off. `list_wlanpis` shows it unreachable, its tools are still listed, and calls fail with a clear message. Power it on, and it works again.
+
+## Advanced: Direct Connection
+
+The extension is the easy path, but any MCP client that speaks streamable HTTP can talk to a Pi directly at `https://<host>:8767/mcp`, sending the wlanpi-core token as `Authorization: Bearer <token>`. You then handle certificate trust yourself, for example by copying the Pi's `/etc/nginx/ssl/self-signed-wlanpi.cert` to your machine.
+
+For Claude Code:
+
+```bash
+claude mcp add --transport http wlanpi https://wlanpi.local:8767/mcp --header "Authorization: Bearer ${WLANPI_TOKEN}"
+NODE_EXTRA_CA_CERTS=./self-signed-wlanpi.cert claude
+```
+
+Normal certificate checks also require the address to match a name in the certificate, and a Pi's certificate covers only `wlanpi.local`. So `NODE_EXTRA_CA_CERTS` works when you connect as `https://wlanpi.local:8767/mcp`, but not by IP address or another hostname. The extension avoids this by pinning each Pi's certificate instead.
+
+MCP gateways and aggregators such as LiteLLM or MetaMCP can be pointed at the same URL. Each Pi is then a separate server, without the extension's single tool list, pinning and token checks.
+
+## Roadmap
+
+- Find Pis on the local network automatically (mDNS), instead of adding them by address.
+- Standalone builds, so the Claude Code plugin needs no Node.js on the `PATH`.
 
 ## Development and Contributing
 

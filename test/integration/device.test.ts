@@ -167,8 +167,8 @@ describe("DeviceConnection against a mock Pi", () => {
       expect(mock.requests.every((r) => r.headers.authorization === undefined)).toBe(true);
     });
 
-    it("explains a rejected token, without backing off", async () => {
-      const mock = await pi();
+    it("explains a token rejected with HTTP 401, without backing off", async () => {
+      const mock = await pi({ auth: "http" });
       const conn = connection(targetFor(mock, { token: "expired" }));
       const err = await failure(conn.callTool("echo", { message: "x" }));
       expect(err.kind).toBe("auth");
@@ -178,6 +178,20 @@ describe("DeviceConnection against a mock Pi", () => {
       const before = mock.requests.length;
       await failure(conn.callTool("echo", { message: "x" }));
       expect(mock.requests.length).toBeGreaterThan(before);
+    });
+
+    it("verifies a token through wlanpi-core", async () => {
+      const mock = await pi();
+      expect(await connection(targetFor(mock)).verifyToken()).toEqual({ status: "valid" });
+
+      const bad = await connection(targetFor(mock, { token: "expired" })).verifyToken();
+      expect(bad.status).toBe("rejected");
+      expect(bad.status === "rejected" && bad.error.message).toMatch(/rejected its token \(wlanpi-core returned 401\)/);
+
+      expect((await connection(targetFor(mock, { token: null })).verifyToken()).status).toBe("rejected");
+
+      await mock.stop();
+      expect((await connection(targetFor(mock)).verifyToken()).status).toBe("unknown");
     });
 
     it("sends each device only its own token", async () => {

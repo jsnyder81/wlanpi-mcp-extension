@@ -65,6 +65,12 @@ export interface ProbeResult {
   error?: DeviceError;
 }
 
+export type TokenCheck =
+  | { status: "valid" }
+  | { status: "rejected"; error: DeviceError }
+  /** The check could not run (Pi unreachable, or it lacks the check tool). */
+  | { status: "unknown"; reason: string };
+
 export interface DeviceConnectionOptions {
   connectTimeoutMs?: number;
   callTimeoutMs?: number;
@@ -143,6 +149,29 @@ function codeOf(err: unknown): string | undefined {
 
 const seconds = (ms: number) => `${Math.round(ms / 100) / 10}s`;
 
+/**
+ * wlanpi-mcp only checks that a Bearer token is present; wlanpi-core validates it when a
+ * tool calls the core API. So initialize and tools/list succeed with any token, and a
+ * bad one shows up as a tool error carrying core's status. This read-only tool is what
+ * the bridge calls to find out whether a token really works (the same core endpoint
+ * wlanpi-mcp itself uses to check a token).
+ */
+export const TOKEN_CHECK_TOOL = "get_device_info";
+const CORE_AUTH_FAILURE = /wlanpi-core returned (401|403)\b/;
+
+/** A tool result that failed because wlanpi-core refused the token. */
+export function isCoreAuthFailure(result: CallToolResult): boolean {
+  return result.isError === true && result.content.some((c) => c.type === "text" && CORE_AUTH_FAILURE.test(c.text));
+}
+
+export function tokenRejectedMessage(target: Pick<DeviceTarget, "name" | "host" | "port" | "token">, detail: string): string {
+  const label = deviceLabel(target);
+  return target.token
+    ? `${label} rejected its token (${detail}): it is expired, revoked or wrong. ` +
+        "On the Pi run 'sudo getjwt claude', then call set_wlanpi_token with the new access_token."
+    : `No token is set for ${label}. On the Pi run 'sudo getjwt claude', then call set_wlanpi_token with the access_token it prints.`;
+}
+
 /** Turn any failure talking to a device into a DeviceError whose message says what to do. */
 export function toDeviceError(err: unknown, target: DeviceTarget, op: Operation, connectTimeoutMs = DEFAULT_CONNECT_TIMEOUT_MS): DeviceError {
   if (err instanceof DeviceError) return err;
@@ -155,13 +184,7 @@ export function toDeviceError(err: unknown, target: DeviceTarget, op: Operation,
   if (err instanceof StreamableHTTPError && err.code !== undefined) {
     const status = err.code;
     if (status === 401 || status === 403) {
-      return make(
-        "auth",
-        target.token
-          ? `${label} rejected its token (HTTP ${status}): it is expired, revoked or wrong. ` +
-              "On the Pi run 'sudo getjwt claude', then call set_wlanpi_token with the new access_token."
-          : `No token is set for ${label}. On the Pi run 'sudo getjwt claude', then call set_wlanpi_token with the access_token it prints.`,
-      );
+      return make("auth", tokenRejectedMessage(target, `HTTP ${status}`));
     }
     if (status === 404) return make("protocol", `${label} answered, but has no MCP endpoint at ${target.path} (HTTP 404). Check that wlanpi-mcp is installed on the Pi.`);
     if (status >= 502 && status <= 504) {
@@ -439,6 +462,25 @@ export class DeviceConnection {
       ...(options.signal ? { signal: options.signal } : {}),
       ...(options.onprogress ? { onprogress: options.onprogress } : {}),
     };
+  }
+
+  /**
+   * Find out whether the device's token is accepted by wlanpi-core, by calling a
+   * read-only tool that goes to the core API. Never throws.
+   */
+  async verifyToken(timeoutMs = this.connectTimeoutMs * 2): Promise<TokenCheck> {
+    try {
+      const result = await this.callTool(TOKEN_CHECK_TOOL, {}, { timeoutMs });
+      if (!result.isError) return { status: "valid" };
+      if (isCoreAuthFailure(result)) {
+        return { status: "rejected", error: new DeviceError("auth", this.name, tokenRejectedMessage(this.target, "wlanpi-core returned 401")) };
+      }
+      const text = result.content.map((c) => (c.type === "text" ? c.text : "")).join(" ");
+      return { status: "unknown", reason: `${TOKEN_CHECK_TOOL} failed: ${text}` };
+    } catch (err) {
+      const error = toDeviceError(err, this.target, { kind: "call", what: "Checking the token", timeoutMs }, this.connectTimeoutMs);
+      return error.kind === "auth" ? { status: "rejected", error } : { status: "unknown", reason: error.message };
+    }
   }
 
   /**
