@@ -1,0 +1,20 @@
+{
+  "name": "wlanpi-mcp-extension",
+  "displayName": "WLAN Pi",
+  "version": "0.1.0",
+  "description": "Connect Claude Code to one or more WLAN Pi devices running wlanpi-mcp. Add a Pi with the add_wlanpi tool; no setup needed. Requires Node.js 22.19 or later.",
+  "author": {
+    "name": "Jake Snyder",
+    "url": "https://github.com/jsnyder81"
+  },
+  "homepage": "https://github.com/jsnyder81/wlanpi-mcp-extension",
+  "repository": "https://github.com/jsnyder81/wlanpi-mcp-extension",
+  "license": "BSD-3-Clause",
+  "keywords": ["wlanpi", "wifi", "wireless", "network", "diagnostics"],
+  "mcpServers": {
+    "wlanpi": {
+      "command": "node",
+      "args": ["${CLAUDE_PLUGIN_ROOT}/dist/index.mjs"]
+    }
+  }
+}
