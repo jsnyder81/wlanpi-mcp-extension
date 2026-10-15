@@ -2,13 +2,18 @@
 // production dependency inlined. The .mcpb and the Claude Code plugin both ship only
 // this file, so it must run with no node_modules (and no package.json) next to it.
 import { rm } from "node:fs/promises";
+import { join } from "node:path";
 import { build } from "esbuild";
 
+// Tests build into their own directory (WLANPI_BUILD_OUT) so parallel runs never
+// delete each other's bundle.
+const outdir = process.env.WLANPI_BUILD_OUT ?? "dist";
+
 // Start clean so nothing stale (an old bundle name) ends up in the .mcpb.
-await rm("dist", { recursive: true, force: true });
+await rm(outdir, { recursive: true, force: true });
 await build({
   entryPoints: ["src/index.ts"],
-  outfile: "dist/index.mjs",
+  outfile: join(outdir, "index.mjs"),
   bundle: true,
   platform: "node",
   format: "esm",

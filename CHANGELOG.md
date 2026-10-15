@@ -1,7 +1,11 @@
 # Changelog
 
-## Unreleased
+## 0.1.0 (2026-10-15)
 
+First release, tested against a WLAN Pi M4 running wlanpi-mcp 1.30.0.
+
+- Tokens are verified with wlanpi-core (through the read-only `get_device_info` tool), because wlanpi-mcp accepts any token for listing tools. `add_wlanpi` reports `token_verified`, `set_wlanpi_token` reports `accepted` only after the check, `list_wlanpis` reports `token_valid`, and a Pi tool that fails with wlanpi-core's 401 gets the fix added to its error.
+- `scripts/check-device.mjs` checks the built extension against a real Pi.
 - Packaging: full MCPB manifest with optional settings (seed devices, default token, CA file); Claude Code plugin and the `wlanpi` marketplace, installed from a `release` branch so `main` never carries the bundle; a release workflow that publishes both; CI smoke-tests the unpacked `.mcpb` and the assembled plugin on Linux and Windows. The bundle is now `dist/index.mjs` and needs no `package.json` beside it.
 - Resources and prompts: each Pi's resources and templates under `wlanpi://<device>/...` with reads routed to that Pi; prompts merged once per name with a `device` argument, and a note naming the Pi added to the rendered prompt. `resources/list_changed` and `prompts/list_changed` are sent on real changes.
 - Bridge server: management tools `add_wlanpi`, `list_wlanpis`, `remove_wlanpi`, `rename_wlanpi`, `trust_wlanpi_cert` and `set_wlanpi_token`; one merged copy of every Pi tool with a `device` routing argument (newest schema wins when versions differ); cached tool lists for offline Pis; `seed_devices` added at startup; `tools/list_changed` on real changes only.

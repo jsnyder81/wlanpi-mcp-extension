@@ -30,6 +30,8 @@ If it matches the "presented" fingerprint in the error, ask Claude to call `trus
 
 ## Token Rejected or Missing
 
+wlanpi-mcp only checks that a token is present; wlanpi-core checks whether it is valid, when a tool calls it. So a Pi lists its tools even with a bad token. The extension therefore verifies each token with a quick read-only call (`get_device_info`) when you add a Pi, when you set a token, and in `list_wlanpis` (`token_valid`).
+
 wlanpi-mcp passes your token to wlanpi-core, which checks it. A message saying the token was rejected means it expired (after 7 days by default), was revoked, or belongs to another Pi. On the Pi, run `sudo getjwt claude` and give the new `access_token` to `set_wlanpi_token`. The extension never refreshes tokens itself.
 
 ## Device Unreachable

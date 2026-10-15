@@ -32,13 +32,11 @@ beforeAll(async () => {
   if (packaged) {
     entry = join(packaged, "dist", "index.mjs");
   } else {
-    execFileSync(process.execPath, [join(root, "esbuild.config.mjs")], { cwd: root, stdio: "ignore" });
-    // Copy the bundle alone out of the repo, so a dependency that was not bundled cannot
-    // be found in the repo's node_modules.
-    const installed = join(dir, "extension", "dist");
-    await fs.mkdir(installed, { recursive: true });
-    entry = join(installed, "index.mjs");
-    await fs.copyFile(join(root, "dist", "index.mjs"), entry);
+    // Build outside the repo, so a dependency that was not bundled cannot be found in
+    // the repo's node_modules.
+    const out = join(dir, "extension", "dist");
+    execFileSync(process.execPath, [join(root, "esbuild.config.mjs")], { cwd: root, stdio: "ignore", env: { ...process.env, WLANPI_BUILD_OUT: out } });
+    entry = join(out, "index.mjs");
   }
   mock = await startMockPi();
 

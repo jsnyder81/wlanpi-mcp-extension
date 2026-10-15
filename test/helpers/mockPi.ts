@@ -43,8 +43,15 @@ export interface MockPrompt extends Prompt {
 export interface MockPiOptions {
   /** serverInfo.version, like wlanpi-mcp's package version. */
   version?: string;
-  /** Bearer token the Pi accepts. Requests without it get 401, like BearerTokenMiddleware. */
+  /** The token wlanpi-core accepts. */
   token?: string;
+  /**
+   * How a wrong token fails. "core" (default) is what a real Pi does: wlanpi-mcp's
+   * middleware only rejects a request with no Bearer token (HTTP 401), and a wrong token
+   * fails later, when a tool or resource calls wlanpi-core. "http" rejects any wrong
+   * token with HTTP 401 up front.
+   */
+  auth?: "core" | "http";
   tools?: MockTool[];
   resources?: MockResource[];
   resourceTemplates?: ResourceTemplate[];
@@ -173,7 +180,9 @@ export async function startMockPi(options: MockPiOptions = {}): Promise<MockPi> 
   const calls: MockPi["calls"] = [];
   const sockets = new Set<Socket>();
 
-  function buildServer(): Server {
+  const coreUnauthorized = "wlanpi-core returned 401: Unauthorized";
+
+  function buildServer(tokenOk: boolean): Server {
     const server = new Server(
       { name: "wlanpi-mcp", version },
       {
@@ -191,6 +200,7 @@ export async function startMockPi(options: MockPiOptions = {}): Promise<MockPi> 
       const tool = tools.find((t) => t.name === request.params.name);
       if (!tool) return { ...text(`Unknown tool: ${request.params.name}`), isError: true };
       const args = request.params.arguments ?? {};
+      if (!tokenOk) return { ...text(`Error executing tool ${tool.name}: ${coreUnauthorized}`), isError: true };
       calls.push({ name: tool.name, arguments: args });
       return (await tool.handler?.(args, {
         signal: extra.signal,
@@ -203,6 +213,7 @@ export async function startMockPi(options: MockPiOptions = {}): Promise<MockPi> 
       server.setRequestHandler(ListResourceTemplatesRequestSchema, async () => ({ resourceTemplates }));
       server.setRequestHandler(ReadResourceRequestSchema, async (request): Promise<ReadResourceResult> => {
         const { uri } = request.params;
+        if (!tokenOk) throw new Error(coreUnauthorized);
         const resource = resources.find((r) => r.uri === uri);
         if (resource) return { contents: [{ uri, mimeType: resource.mimeType, text: resource.text ?? "" }] };
         const status = /^services:\/\/status\/(.+)$/.exec(uri);
@@ -227,7 +238,8 @@ export async function startMockPi(options: MockPiOptions = {}): Promise<MockPi> 
       res.writeHead(404, { "content-type": "application/json" }).end('{"detail":"Not Found"}');
       return;
     }
-    if (req.headers.authorization !== `Bearer ${token}`) {
+    const bearer = /^Bearer (.+)$/.exec(req.headers.authorization ?? "")?.[1];
+    if (!bearer || ((options.auth ?? "core") === "http" && bearer !== token)) {
       res.writeHead(401, { "content-type": "application/json" }).end('{"detail":"Missing or invalid bearer token"}');
       return;
     }
@@ -236,7 +248,7 @@ export async function startMockPi(options: MockPiOptions = {}): Promise<MockPi> 
       res.writeHead(405, { allow: "POST" }).end();
       return;
     }
-    const server = buildServer();
+    const server = buildServer(bearer === token);
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: options.jsonResponse ?? true });
     res.on("close", () => {
       void transport.close();

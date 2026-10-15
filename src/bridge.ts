@@ -38,7 +38,9 @@ import {
   type DeviceConnectionOptions,
   type DeviceTarget,
   deviceLabel,
+  isCoreAuthFailure,
   toDeviceError,
+  tokenRejectedMessage,
   trustFor,
 } from "./device.js";
 import { DeviceError, DuplicateDeviceError, UnknownDeviceError, ValidationError } from "./errors.js";
@@ -501,6 +503,10 @@ export class Bridge {
     });
     // The device answered; if its tool list came from the cache, refresh it quietly.
     if (!state.live) void this.refreshDevice(device).catch(() => {});
+    // wlanpi-core refused the token: keep the Pi's result and add what to do about it.
+    if (isCoreAuthFailure(result)) {
+      return { ...result, content: [...result.content, { type: "text", text: tokenRejectedMessage(state.record, "wlanpi-core returned 401") }] };
+    }
     return result;
   }
 
@@ -600,6 +606,17 @@ export class Bridge {
       tokenProblem = error.message;
     }
 
+    // initialize and tools/list succeed with any token; only a call into wlanpi-core
+    // shows whether it really works.
+    let tokenVerified = false;
+    let tokenWarning: string | undefined;
+    if (catalog) {
+      const check = await connection.verifyToken();
+      if (check.status === "valid") tokenVerified = true;
+      else if (check.status === "rejected") tokenProblem = check.error.message;
+      else tokenWarning = `The token could not be checked: ${check.reason}`;
+    }
+
     try {
       await this.registry.add({ name, host, port, cert_sha256: caMode ? null : cert.fingerprint256, token });
     } catch (err) {
@@ -619,11 +636,13 @@ export class Bridge {
 
     const nextSteps = [`Ask the user to confirm the fingerprint matches the Pi. On the Pi: ${PI_CERT_COMMAND}`];
     if (tokenProblem) nextSteps.push(tokenProblem);
+    if (tokenWarning) nextSteps.push(tokenWarning);
     return {
       name,
       host,
       port,
-      status: catalog ? "ready" : "needs_token",
+      status: catalog && !tokenProblem ? "ready" : "needs_token",
+      token_verified: tokenVerified,
       trust: caMode ? "ca" : "pinned",
       certificate: describeCert(cert),
       ...(catalog ? { server: catalog.serverInfo, tool_count: catalog.tools.length } : {}),
@@ -648,17 +667,28 @@ export class Bridge {
           tool_count: state.catalog?.tools.length ?? 0,
         };
         try {
-          const probe = await (await this.connectionFor(state)).probe(this.probeTimeoutMs);
+          const connection = await this.connectionFor(state);
+          const probe = await connection.probe(this.probeTimeoutMs);
           if (probe.ok && !state.live) void this.refreshDevice(name).catch(() => {});
-          return probe.ok
-            ? { ...base, reachable: true, latency_ms: probe.latencyMs, server_version: probe.serverInfo?.version ?? state.catalog?.serverInfo.version }
-            : {
-                ...base,
-                reachable: false,
-                ...(probe.error?.kind === "auth" ? { reachable: true, needs_token: true } : {}),
-                server_version: state.catalog?.serverInfo.version ?? null,
-                error: probe.error?.message,
-              };
+          if (probe.ok) {
+            // Tokens expire (7 days by default): say so here rather than on the next call.
+            const check = token ? await connection.verifyToken(this.probeTimeoutMs * 2) : undefined;
+            return {
+              ...base,
+              reachable: true,
+              latency_ms: probe.latencyMs,
+              server_version: probe.serverInfo?.version ?? state.catalog?.serverInfo.version,
+              token_valid: check?.status === "valid" ? true : check?.status === "rejected" ? false : null,
+              ...(check?.status === "rejected" ? { needs_token: true, error: check.error.message } : {}),
+            };
+          }
+          return {
+            ...base,
+            reachable: false,
+            ...(probe.error?.kind === "auth" ? { reachable: true, needs_token: true } : {}),
+            server_version: state.catalog?.serverInfo.version ?? null,
+            error: probe.error?.message,
+          };
         } catch (err) {
           return { ...base, reachable: false, error: err instanceof Error ? err.message : String(err) };
         }
@@ -736,7 +766,11 @@ export class Bridge {
     await this.sync();
     try {
       await this.refreshDevice(name);
-      return { name, status: "accepted", tool_count: this.states.get(name)?.catalog?.tools.length ?? 0 };
+      const state = this.states.get(name);
+      const check = state ? await (await this.connectionFor(state)).verifyToken() : undefined;
+      if (check?.status === "rejected") return { name, status: "rejected", error: check.error.message };
+      if (check?.status !== "valid") return { name, status: "saved_untested", error: check?.reason ?? "The device was removed." };
+      return { name, status: "accepted", tool_count: state?.catalog?.tools.length ?? 0 };
     } catch (err) {
       const error = err instanceof DeviceError ? err : undefined;
       return error?.kind === "auth"

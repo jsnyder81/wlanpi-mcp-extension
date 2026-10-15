@@ -19,6 +19,7 @@ describe("adding a WLAN Pi (trust on first use)", () => {
       host: "127.0.0.1",
       port: mock.port,
       status: "ready",
+      token_verified: true,
       trust: "pinned",
       certificate: { fingerprint_sha256: mock.cert.fingerprint256, subject: "CN=wlanpi", self_signed: true },
       server: { name: "wlanpi-mcp", version: "0.6.17-3" },
@@ -55,6 +56,40 @@ describe("adding a WLAN Pi (trust on first use)", () => {
     expect(data(await h.call("set_wlanpi_token", { device: "lab", token: mock.token }))).toEqual({ name: "lab", status: "accepted", tool_count: 5 });
     expect(await h.piToolNames()).toHaveLength(5);
     expect(JSON.stringify(await h.call("list_wlanpis"))).not.toContain(mock.token);
+  });
+
+  it("checks the token against wlanpi-core, since any token passes initialize", async () => {
+    const mock = await pi();
+    const h = await harness();
+
+    const added = await add(h, mock, "lab", "expired-token");
+    expect(added).toMatchObject({ status: "needs_token", token_verified: false });
+    expect((added.next_steps as string[])[1]).toMatch(/rejected its token \(wlanpi-core returned 401\).*set_wlanpi_token/);
+    // The Pi answered tools/list, so its tools are listed anyway.
+    expect(await h.piToolNames()).toHaveLength(5);
+
+    // A call that reaches core keeps the Pi's error and adds what to do.
+    const call = await h.call("echo", { message: "x" });
+    expect(call.isError).toBe(true);
+    expect(call.content).toEqual([
+      { type: "text", text: "Error executing tool echo: wlanpi-core returned 401: Unauthorized" },
+      { type: "text", text: expect.stringMatching(/^'lab' \(127\.0\.0\.1:\d+\) rejected its token .*sudo getjwt claude/) },
+    ]);
+
+    const listed = data(await h.call("list_wlanpis"));
+    expect(listed.devices).toEqual([expect.objectContaining({ reachable: true, token_valid: false, needs_token: true })]);
+
+    expect(data(await h.call("set_wlanpi_token", { device: "lab", token: mock.token })).status).toBe("accepted");
+    expect(data(await h.call("list_wlanpis")).devices).toEqual([expect.objectContaining({ token_valid: true })]);
+    expect(textOf(await h.call("echo", { message: "ok" }))).toBe("ok");
+  });
+
+  it("reports ready with an unverified token when the Pi lacks the check tool", async () => {
+    const mock = await pi({ tools: defaultTools().filter((t) => t.name !== "get_device_info") });
+    const h = await harness();
+    const added = await add(h, mock, "lab");
+    expect(added).toMatchObject({ status: "ready", token_verified: false });
+    expect((added.next_steps as string[]).at(-1)).toMatch(/The token could not be checked/);
   });
 
   it("uses default_token when add_wlanpi gets no token", async () => {
@@ -176,8 +211,9 @@ describe("several WLAN Pis", () => {
     // The same tool on both devices in one turn.
     expect(textOf(await h.call("echo", { device: "bench", message: "hi" }))).toBe("hi");
     expect(textOf(await h.call("echo", { device: "field", message: "hi", upper: true }))).toBe("HI");
-    expect(older.calls).toEqual([{ name: "echo", arguments: { message: "hi" } }]);
-    expect(newer.calls).toEqual([{ name: "echo", arguments: { message: "hi", upper: true } }]);
+    const echoes = (mock: typeof older) => mock.calls.filter((c) => c.name === "echo");
+    expect(echoes(older)).toEqual([{ name: "echo", arguments: { message: "hi" } }]);
+    expect(echoes(newer)).toEqual([{ name: "echo", arguments: { message: "hi", upper: true } }]);
     // Each device only ever saw its own token.
     expect(older.requests.every((r) => r.headers.authorization === "Bearer tok-old")).toBe(true);
     expect(newer.requests.every((r) => r.headers.authorization === "Bearer tok-new")).toBe(true);
@@ -232,7 +268,7 @@ describe("several WLAN Pis", () => {
     const bt = (await h.client.listTools()).tools.find((t) => t.name === "bt_pair")!;
     expect(bt.inputSchema.required).toEqual(["wlanpi_device", "device"]);
     expect(textOf(await h.call("bt_pair", { wlanpi_device: "lab", device: "AA:BB:CC:DD:EE:FF" }))).toBe("paired AA:BB:CC:DD:EE:FF");
-    expect(mock.calls).toEqual([{ name: "bt_pair", arguments: { device: "AA:BB:CC:DD:EE:FF" } }]);
+    expect(mock.calls.filter((c) => c.name === "bt_pair")).toEqual([{ name: "bt_pair", arguments: { device: "AA:BB:CC:DD:EE:FF" } }]);
   });
 });
 
