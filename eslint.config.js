@@ -2,7 +2,7 @@ import js from "@eslint/js";
 import tseslint from "typescript-eslint";
 
 export default tseslint.config(
-  { ignores: ["dist/", "node_modules/", "coverage/", "*.mcpb"] },
+  { ignores: ["dist/", "build/", "node_modules/", "coverage/", "*.mcpb"] },
   js.configs.recommended,
   ...tseslint.configs.recommended,
   {
@@ -13,8 +13,8 @@ export default tseslint.config(
     },
   },
   {
-    files: ["*.config.{js,mjs,ts}"],
-    languageOptions: { globals: { process: "readonly", console: "readonly" } },
+    files: ["*.config.{js,mjs,ts}", "scripts/**/*.mjs"],
+    languageOptions: { globals: { process: "readonly", console: "readonly", URL: "readonly" } },
     rules: { "no-console": "off" },
   },
 );

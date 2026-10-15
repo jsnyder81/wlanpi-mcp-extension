@@ -27,7 +27,9 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "pack": "npm run build && mcpb validate manifest.json && mcpb pack . wlanpi-mcp-extension.mcpb",
-    "check": "npm run lint && npm run typecheck && npm test"
+    "check": "npm run lint && npm run typecheck && npm test",
+    "plugin": "npm run build && node scripts/assemble-plugin.mjs",
+    "test:smoke": "vitest run test/smoke"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.32.1",

@@ -1,0 +1,82 @@
+name: Release
+
+# Push a tag vX.Y.Z (matching package.json) to publish:
+#  - a GitHub Release with the .mcpb for Claude Desktop, and
+#  - the assembled Claude Code plugin on the `release` branch, which the marketplace
+#    entry in .claude-plugin/marketplace.json installs from.
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+          cache: npm
+      - run: npm ci
+
+      - name: Check the tag matches the version
+        run: |
+          version="$(node -p 'require("./package.json").version')"
+          if [ "${GITHUB_REF_NAME}" != "v${version}" ]; then
+            echo "Tag ${GITHUB_REF_NAME} does not match package.json version ${version}" >&2
+            exit 1
+          fi
+          echo "VERSION=${version}" >> "$GITHUB_ENV"
+
+      - run: npm run check
+
+      - name: Pack and smoke-test the .mcpb
+        run: |
+          npm run pack
+          npx mcpb unpack wlanpi-mcp-extension.mcpb build/mcpb
+          WLANPI_SMOKE_DIR="$PWD/build/mcpb" npm run test:smoke
+          mv wlanpi-mcp-extension.mcpb "wlanpi-mcp-extension-${VERSION}.mcpb"
+
+      - name: Assemble and smoke-test the plugin
+        run: |
+          node scripts/assemble-plugin.mjs
+          WLANPI_SMOKE_DIR="$PWD/build/plugin" npm run test:smoke
+
+      - name: Publish the plugin to the release branch
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if git ls-remote --exit-code --heads origin release >/dev/null; then
+            git fetch origin release
+            git worktree add build/release-branch origin/release
+            git -C build/release-branch checkout -B release
+          else
+            git worktree add --orphan -b release build/release-branch
+          fi
+          find build/release-branch -mindepth 1 -maxdepth 1 ! -name .git -exec rm -rf {} +
+          cp -R build/plugin/. build/release-branch/
+          git -C build/release-branch add -A
+          if git -C build/release-branch diff --cached --quiet; then
+            echo "Release branch already up to date."
+          else
+            git -C build/release-branch commit -m "Release ${GITHUB_REF_NAME} (from ${GITHUB_SHA})"
+            git -C build/release-branch push origin release
+          fi
+
+      - name: Create the GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" "wlanpi-mcp-extension-${VERSION}.mcpb" \
+            --title "${GITHUB_REF_NAME}" \
+            --notes "Claude Desktop: download wlanpi-mcp-extension-${VERSION}.mcpb and open it. Claude Code: /plugin marketplace add jsnyder81/wlanpi-mcp-extension, then /plugin install wlanpi-mcp-extension@wlanpi. See CHANGELOG.md for changes."

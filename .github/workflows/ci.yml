@@ -29,10 +29,14 @@ jobs:
       - run: npm test
       - run: npm run build
 
-  pack:
-    name: mcpb pack
-    runs-on: ubuntu-latest
+  package:
+    name: package (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
     needs: test
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
@@ -40,8 +44,19 @@ jobs:
           node-version: "22"
           cache: npm
       - run: npm ci
+      # Pack the .mcpb, unpack it, and run the smoke test against what users install.
       - run: npm run pack
-      - uses: actions/upload-artifact@v7
+      - run: npx mcpb unpack wlanpi-mcp-extension.mcpb build/mcpb
+      - run: npm run test:smoke
+        env:
+          WLANPI_SMOKE_DIR: ${{ github.workspace }}/build/mcpb
+      # Same for the Claude Code plugin, as the release branch will carry it.
+      - run: node scripts/assemble-plugin.mjs
+      - run: npm run test:smoke
+        env:
+          WLANPI_SMOKE_DIR: ${{ github.workspace }}/build/plugin
+      - if: matrix.os == 'ubuntu-latest'
+        uses: actions/upload-artifact@v7
         with:
           name: wlanpi-mcp-extension-mcpb
           path: wlanpi-mcp-extension.mcpb

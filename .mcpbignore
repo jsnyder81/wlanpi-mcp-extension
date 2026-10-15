@@ -1,4 +1,4 @@
-# The bundle ships only dist/index.js (dependencies are inlined by esbuild),
+# The bundle ships only dist/index.mjs (dependencies are inlined by esbuild),
 # the manifest, and the license and docs.
 node_modules/
 src/
@@ -6,7 +6,10 @@ test/
 coverage/
 .github/
 .claude-plugin/
-.mcp.json
+plugin/
+scripts/
+build/
+package.json
 *.config.*
 tsconfig.json
 package-lock.json
