@@ -1,6 +1,6 @@
-import type { Tool } from "@modelcontextprotocol/sdk/types.js";
+import type { Prompt, Tool } from "@modelcontextprotocol/sdk/types.js";
 import { describe, expect, it } from "vitest";
-import { canonicalJson, compareVersions, mergeTools } from "../../src/catalog.js";
+import { canonicalJson, compareVersions, fromBridgeUri, mergePrompts, mergeResources, mergeTools, toBridgeUri } from "../../src/catalog.js";
 import { createLogger } from "../../src/log.js";
 
 const tool = (name: string, properties: Record<string, object> = {}, extra: Partial<Tool> = {}): Tool => ({
@@ -154,5 +154,92 @@ describe("mergeTools", () => {
     );
     expect(tools[0]).toMatchObject({ annotations: { destructiveHint: true }, outputSchema: rich.outputSchema });
     expect(tools[0]?.inputSchema.required).toEqual(["device", "delay"]);
+  });
+});
+
+describe("bridge resource URIs", () => {
+  it.each([
+    ["device://info", "wlanpi://lab/device/info"],
+    ["netconfig://leftovers", "wlanpi://lab/netconfig/leftovers"],
+    ["services://status/{name}", "wlanpi://lab/services/status/{name}"],
+    ["services://status/ssh", "wlanpi://lab/services/status/ssh"],
+    ["DEVICE://Info", "wlanpi://lab/device/Info"],
+    ["file:///tmp/capture.pcapng", "wlanpi://lab/file//tmp/capture.pcapng"],
+    ["profiler://status?x=1", "wlanpi://lab/profiler/status?x=1"],
+  ])("%s round-trips through %s", (piUri, bridgeUri) => {
+    expect(toBridgeUri("lab", piUri)).toBe(bridgeUri);
+    expect(fromBridgeUri(bridgeUri)).toEqual({ device: "lab", piUri: piUri.replace(/^DEVICE/, "device") });
+  });
+
+  it("cannot map a URI without scheme://", () => {
+    expect(toBridgeUri("lab", "urn:wlanpi:info")).toBeUndefined();
+  });
+
+  it.each(["device://info", "wlanpi://lab", "wlanpi://lab/", "wlanpi://lab/device", "wlanpi://la_b/device/info", "wlanpi:///device/info", "other://lab/device/info"])(
+    "rejects %s as a bridge URI",
+    (uri) => {
+      expect(fromBridgeUri(uri)).toBeUndefined();
+    },
+  );
+
+  it("lowercases the device name", () => {
+    expect(fromBridgeUri("wlanpi://LAB/device/info")).toEqual({ device: "lab", piUri: "device://info" });
+  });
+});
+
+describe("mergeResources", () => {
+  it("lists every device's resources under its own prefix and labels them", () => {
+    const lines: string[] = [];
+    const merged = mergeResources(
+      [
+        { device: "lab", resources: [{ uri: "device://info", name: "device_info", description: "Device facts." }, { uri: "urn:x", name: "odd" }], resourceTemplates: [] },
+        { device: "field", resources: [{ uri: "device://info", name: "device_info" }], resourceTemplates: [{ uriTemplate: "services://status/{name}", name: "service_status" }] },
+      ],
+      { logger: createLogger("warn", (l) => lines.push(l)) },
+    );
+    expect(merged.resources).toEqual([
+      { uri: "wlanpi://field/device/info", name: "device_info", title: "device_info (field)", description: "From WLAN Pi 'field'." },
+      { uri: "wlanpi://lab/device/info", name: "device_info", title: "device_info (lab)", description: "Device facts. From WLAN Pi 'lab'." },
+    ]);
+    expect(merged.resourceTemplates).toEqual([
+      { uriTemplate: "wlanpi://field/services/status/{name}", name: "service_status", title: "service_status (field)", description: "From WLAN Pi 'field'." },
+    ]);
+    expect(lines.join("")).toMatch(/Skipping resource 'urn:x' from 'lab'/);
+  });
+});
+
+describe("mergePrompts", () => {
+  const prompt = (name: string, args: Prompt["arguments"] = [], description = `${name} prompt`): Prompt => ({ name, description, arguments: args });
+
+  it("adds an optional device argument with one device", () => {
+    const { prompts, routes } = mergePrompts([{ device: "lab", version: "1", prompts: [prompt("health_check")] }], ["lab"]);
+    expect(prompts).toEqual([
+      { name: "health_check", description: "health_check prompt", arguments: [{ name: "device", description: expect.stringMatching(/defaults to 'lab'/), required: false }] },
+    ]);
+    expect(routes.get("health_check")).toEqual({ param: "device", devices: ["lab"] });
+  });
+
+  it("requires device with two devices, keeps arguments, and merges like tools", () => {
+    const service = [{ name: "service_name", required: true }];
+    const { prompts } = mergePrompts(
+      [
+        { device: "lab", version: "0.6.17-3", prompts: [prompt("troubleshoot_service", service), prompt("health_check")] },
+        { device: "field", version: "0.7.0", prompts: [prompt("troubleshoot_service", service, "Newer wording.")] },
+      ],
+      ["field", "lab"],
+    );
+    expect(prompts.map((p) => p.name)).toEqual(["health_check", "troubleshoot_service"]);
+    expect(prompts[0]?.description).toBe("health_check prompt\n\nAvailable on: lab.");
+    expect(prompts[1]).toEqual({
+      name: "troubleshoot_service",
+      description: "Newer wording.\n\nAvailable on: field, lab.",
+      arguments: [{ name: "device", description: "WLAN Pi to use: one of field, lab.", required: true }, { name: "service_name", required: true }],
+    });
+  });
+
+  it("uses wlanpi_device when a prompt already has a device argument", () => {
+    const { prompts, routes } = mergePrompts([{ device: "lab", version: "1", prompts: [prompt("bt", [{ name: "device" }])] }], ["lab"]);
+    expect(routes.get("bt")?.param).toBe("wlanpi_device");
+    expect(prompts[0]?.arguments?.map((a) => a.name)).toEqual(["wlanpi_device", "device"]);
   });
 });

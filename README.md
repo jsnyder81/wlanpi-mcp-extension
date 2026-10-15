@@ -13,7 +13,7 @@ Each WLAN Pi runs `wlanpi-mcp`, an MCP server served over HTTPS on the Pi with a
 - One install, any number of WLAN Pis.
 - Trust on first use (TOFU) certificate pinning per device, with an explicit re-trust step when a certificate changes.
 - One aggregated tool list with a `device` routing argument, so the tool list does not grow with device count.
-- Planned: Pi resources exposed as `wlanpi://<device>/...` and prompts with a `device` argument.
+- Each Pi's resources exposed as `wlanpi://<device>/...`, and its prompts with a `device` argument.
 - Cached tool lists, so a Pi that is offline at startup still has its tools listed and calls to it fail with a clear error.
 
 ## Installation
@@ -37,6 +37,8 @@ Ask Claude in plain language. The extension's own tools manage the list of Pis:
 | `set_wlanpi_token` | Set or replace a Pi's wlanpi-core token |
 
 Every wlanpi-mcp tool is listed once, with a `device` argument naming the Pi to run on. With one Pi registered, `device` is optional. If Pis run different wlanpi-mcp versions, a tool's description lists which Pis offer it.
+
+Each Pi's resources appear under its own prefix: `device://info` on the Pi named `lab` is `wlanpi://lab/device/info`. Prompts such as `health_check` are listed once and take a `device` argument like tools do.
 
 ### Getting a Token
 
