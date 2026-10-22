@@ -662,7 +662,7 @@ export class Bridge {
     if (!state.live) void this.refreshDevice(device).catch(() => {});
     // wlanpi-core refused the token: keep the Pi's result and add what to do about it.
     if (isCoreAuthFailure(result)) {
-      return { ...result, content: [...result.content, { type: "text", text: tokenRejectedMessage(state.record, "wlanpi-core returned 401") }] };
+      return { ...result, content: [...result.content, { type: "text", text: tokenRejectedMessage(connection.target, "wlanpi-core returned 401") }] };
     }
     return result;
   }

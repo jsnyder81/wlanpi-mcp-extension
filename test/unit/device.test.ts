@@ -69,7 +69,8 @@ describe("toDeviceError", () => {
   it("maps 401 with and without a token", () => {
     expect(toDeviceError(new StreamableHTTPError(401, "x"), target, connect).message).toBe(
       "'lab' (10.0.0.5) rejected its token (HTTP 401): it is expired, revoked or wrong. " +
-        "On the Pi run 'sudo getjwt claude', then call set_wlanpi_token with the new access_token.",
+        "On the Pi run 'sudo getjwt claude', then put the access_token in the extension's tokens setting as lab=<token> and restart the extension " +
+          "(or, for a Pi without a token in settings, call set_wlanpi_token with it).",
     );
     const noToken = toDeviceError(new StreamableHTTPError(401, "x"), { ...target, token: null }, connect);
     expect(noToken.kind).toBe("auth");

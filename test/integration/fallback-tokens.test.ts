@@ -250,6 +250,16 @@ describe("tokens from settings", () => {
     ]);
   });
 
+  it("says a rejected token from settings was rejected, and where to renew it", async () => {
+    const mock = await pi({ token: "good" });
+    const h = await harness({ tokens: "lab=expired" });
+    await add(h, mock, "lab", null);
+    const text = textOf(await h.call("get_device_info"));
+    expect(text).toContain("'lab' (127.0.0.1:");
+    expect(text).toMatch(/rejected its token \(wlanpi-core returned 401\).*tokens setting as lab=<token> and restart/s);
+    expect(text).not.toContain("No token is set");
+  });
+
   it("still accepts the old default token setting", async () => {
     const mock = await pi();
     const h = await harness({ defaultToken: mock.token });

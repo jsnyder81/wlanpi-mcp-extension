@@ -164,12 +164,17 @@ export function isCoreAuthFailure(result: CallToolResult): boolean {
   return result.isError === true && result.content.some((c) => c.type === "text" && CORE_AUTH_FAILURE.test(c.text));
 }
 
+/** Where a token is set depends on the user's setup, so the fix names both places. */
+const NEW_TOKEN_STEPS =
+  "put the access_token in the extension's tokens setting as <name>=<token> and restart the extension " +
+  "(or, for a Pi without a token in settings, call set_wlanpi_token with it).";
+
 export function tokenRejectedMessage(target: Pick<DeviceTarget, "name" | "host" | "port" | "token">, detail: string): string {
   const label = deviceLabel(target);
+  const steps = NEW_TOKEN_STEPS.replace("<name>", target.name);
   return target.token
-    ? `${label} rejected its token (${detail}): it is expired, revoked or wrong. ` +
-        "On the Pi run 'sudo getjwt claude', then call set_wlanpi_token with the new access_token."
-    : `No token is set for ${label}. On the Pi run 'sudo getjwt claude', then call set_wlanpi_token with the access_token it prints.`;
+    ? `${label} rejected its token (${detail}): it is expired, revoked or wrong. On the Pi run 'sudo getjwt claude', then ${steps}`
+    : `No token is set for ${label}. On the Pi run 'sudo getjwt claude', then ${steps}`;
 }
 
 /** Turn any failure talking to a device into a DeviceError whose message says what to do. */
