@@ -223,7 +223,8 @@ describe("DeviceConnection against a mock Pi", () => {
       }
 
       expect(err.kind).toBe("cert-mismatch");
-      expect(err.message).toContain(`Certificate for 'lab' changed. Pinned ${old}, presented ${fresh.fingerprint256}.`);
+      expect(err.message).toContain(`Certificate for 'lab' changed: it no longer matches the pinned fingerprint ${old}.`);
+      expect(err.message).not.toContain(fresh.fingerprint256);
       expect(mock.requests.length).toBe(before);
       expect(conn.connected).toBe(false);
     });

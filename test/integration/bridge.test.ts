@@ -1,4 +1,4 @@
-import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
+import type { CallToolResult, ElicitResult } from "@modelcontextprotocol/sdk/types.js";
 import { describe, expect, it } from "vitest";
 import { Registry } from "../../src/registry.js";
 import { MANAGEMENT, add, data, hostOf, settle, textOf, useBridgeHarness } from "../helpers/bridgeHarness.js";
@@ -140,6 +140,44 @@ describe("adding a WLAN Pi (trust on first use)", () => {
 });
 
 describe("changed certificates", () => {
+  it("asks the user to confirm a new certificate when the client supports elicitation", async () => {
+    const mock = await pi();
+    const prompts: string[] = [];
+    let answer: ElicitResult = { action: "decline" };
+    const h = await harness({}, { elicit: (message) => (prompts.push(message), answer) });
+    await add(h, mock, "lab");
+    const original = mock.cert.fingerprint256;
+    const fresh = await mock.swapCert();
+
+    expect(data(await h.call("trust_wlanpi_cert", { device: "lab", fingerprint: fresh.fingerprint256 }))).toMatchObject({ status: "declined" });
+    expect(prompts[0]).toContain(`It now presents SHA-256 fingerprint ${fresh.fingerprint256}`);
+    expect(h.registry.get("lab")?.cert_sha256).toBe(original);
+
+    answer = { action: "accept", content: { matches: false } };
+    expect(data(await h.call("trust_wlanpi_cert", { device: "lab", fingerprint: fresh.fingerprint256 }))).toMatchObject({ status: "declined" });
+
+    answer = { action: "accept", content: { matches: true } };
+    expect(data(await h.call("trust_wlanpi_cert", { device: "lab", fingerprint: fresh.fingerprint256 }))).toMatchObject({ status: "trusted" });
+    expect(h.registry.get("lab")?.cert_sha256).toBe(fresh.fingerprint256);
+  });
+
+  it("treats a failed confirmation as a no", async () => {
+    const mock = await pi();
+    const h = await harness(
+      {},
+      {
+        elicit: () => {
+          throw new Error("no UI");
+        },
+      },
+    );
+    await add(h, mock, "lab");
+    const original = mock.cert.fingerprint256;
+    const fresh = await mock.swapCert();
+    expect(data(await h.call("trust_wlanpi_cert", { device: "lab", fingerprint: fresh.fingerprint256 }))).toMatchObject({ status: "declined" });
+    expect(h.registry.get("lab")?.cert_sha256).toBe(original);
+  });
+
   it("refuses calls until the new certificate is explicitly trusted", async () => {
     const mock = await pi();
     const h = await harness();
@@ -151,17 +189,17 @@ describe("changed certificates", () => {
     let refused = await h.call("echo", { message: "x" });
     if (!/Certificate for/.test(textOf(refused))) refused = await h.call("echo", { message: "x" });
     expect(refused.isError).toBe(true);
-    expect(textOf(refused)).toBe(
-      `Certificate for 'lab' changed. Pinned ${original}, presented ${fresh.fingerprint256}. ` +
-        "If this is expected (for example the Pi was reimaged), verify the new fingerprint on the Pi and call trust_wlanpi_cert.",
-    );
+    expect(textOf(refused)).toContain(`Certificate for 'lab' changed: it no longer matches the pinned fingerprint ${original}.`);
+    // The presented fingerprint must come from the user reading the Pi, so it is not shown.
+    expect(textOf(refused)).not.toContain(fresh.fingerprint256);
     const callsBefore = mock.calls.length;
 
     // The old pin, or any other value, is refused and nothing changes.
     for (const wrong of [original, "AB".repeat(32)]) {
       const result = await h.call("trust_wlanpi_cert", { device: "lab", fingerprint: wrong });
       expect(result.isError).toBe(true);
-      expect(textOf(result)).toMatch(/does not match the certificate 'lab' .* presents now .*Nothing was changed/);
+      expect(textOf(result)).toMatch(/does not match the certificate 'lab' .* presents now\. Nothing was changed/);
+      expect(textOf(result)).not.toContain(fresh.fingerprint256);
     }
     expect(h.registry.get("lab")?.cert_sha256).toBe(original);
     expect(textOf(await h.call("trust_wlanpi_cert", { device: "lab", fingerprint: "not hex" }))).toMatch(/is not a SHA-256 fingerprint/);
@@ -202,7 +240,7 @@ describe("several WLAN Pis", () => {
 
     const echo = piTools.find((t) => t.name === "echo")!;
     expect(echo.inputSchema.required).toEqual(["device", "message"]);
-    expect(echo.inputSchema.properties?.device).toMatchObject({ enum: ["bench", "field"] });
+    expect(echo.inputSchema.properties?.device).toMatchObject({ description: expect.stringContaining("one of bench, field") });
     expect(echo.inputSchema.properties).toHaveProperty("upper");
     expect(echo.description).toBe("Return the arguments, louder.\n\nAvailable on: bench, field.");
     expect(piTools.find((t) => t.name === "scan_wlan")?.description).toBe("Scan for Wi-Fi networks.\n\nAvailable on: field.");
@@ -355,7 +393,7 @@ describe("registry changes", () => {
 
     expect(data(await h.call("rename_wlanpi", { device: "lab", new_name: "Bench" }))).toEqual({ old_name: "lab", name: "bench", registered_devices: ["bench", "field"] });
     const echo = (await h.client.listTools()).tools.find((t) => t.name === "echo")!;
-    expect(echo.inputSchema.properties?.device).toMatchObject({ enum: ["bench", "field"] });
+    expect(echo.inputSchema.properties?.device).toMatchObject({ description: expect.stringContaining("one of bench, field") });
     expect(textOf(await h.call("echo", { device: "bench", message: "renamed" }))).toBe("renamed");
     expect(a.calls.at(-1)).toEqual({ name: "echo", arguments: { message: "renamed" } });
     expect(textOf(await h.call("rename_wlanpi", { device: "bench", new_name: "field" }))).toMatch(/already registered/);
@@ -385,9 +423,11 @@ describe("seeded devices", () => {
     const h = await harness({ seedDevices: `lab=${hostOf(mock)}, broken=https://nope`, defaultToken: mock.token });
     await h.bridge.start();
 
-    expect(h.registry.get("lab")).toMatchObject({ cert_sha256: mock.cert.fingerprint256, token: mock.token });
+    // The token from settings is used for the seeded host but never written to disk.
+    expect(h.registry.get("lab")).toMatchObject({ cert_sha256: mock.cert.fingerprint256, token: null });
     expect(h.registry.names()).toEqual(["lab"]);
     expect(await h.piToolNames()).toHaveLength(5);
+    expect(data(await h.call("list_wlanpis")).devices).toEqual([expect.objectContaining({ name: "lab", token_set: true, token_valid: true })]);
 
     await h.bridge.start();
     expect(h.registry.names()).toEqual(["lab"]);
@@ -399,5 +439,21 @@ describe("seeded devices", () => {
     const h = await harness({ seedDevices: `lab=${hostOf(mock)}` });
     await h.bridge.start();
     expect(h.registry.names()).toEqual([]);
+  });
+});
+
+describe("last_seen", () => {
+  it("is kept in memory while running and written once on close", async () => {
+    const mock = await pi();
+    const h = await harness();
+    await add(h, mock, "lab");
+    await h.call("echo", { message: "x" });
+    const listed = data(await h.call("list_wlanpis")).devices as Array<{ last_seen: string | null }>;
+    expect(listed[0]?.last_seen).toEqual(expect.any(String));
+    expect((await Registry.open(env.dir)).get("lab")?.last_seen).toBeNull();
+
+    await h.bridge.close();
+    const written = (await Registry.open(env.dir)).get("lab")?.last_seen;
+    expect(written && written >= listed[0]!.last_seen!).toBe(true);
   });
 });

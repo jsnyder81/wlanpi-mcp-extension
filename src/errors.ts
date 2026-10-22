@@ -23,9 +23,16 @@ export class UnknownDeviceError extends Error {
   }
 }
 
+/** Prints a Pi's certificate fingerprint, run on the Pi. */
+export const PI_CERT_COMMAND = "openssl x509 -in /etc/nginx/ssl/self-signed-wlanpi.cert -noout -fingerprint -sha256";
+
 /**
  * The device presented a certificate other than the pinned one. The connection was
  * dropped right after the TLS handshake, before any request (or token) was sent.
+ *
+ * The message leaves out the presented fingerprint on purpose: the fingerprint passed to
+ * trust_wlanpi_cert must come from the user reading it on the Pi, not from whatever is
+ * answering at the Pi's address. `presented` is kept for the log.
  */
 export class CertMismatchError extends Error {
   override name = "CertMismatchError";
@@ -35,8 +42,9 @@ export class CertMismatchError extends Error {
     readonly device?: string,
   ) {
     super(
-      `Certificate for ${device ? `'${device}'` : "the device"} changed. Pinned ${expected}, presented ${presented}. ` +
-        "If this is expected (for example the Pi was reimaged), verify the new fingerprint on the Pi and call trust_wlanpi_cert.",
+      `Certificate for ${device ? `'${device}'` : "the device"} changed: it no longer matches the pinned fingerprint ${expected}. ` +
+        `If this is expected (for example the Pi was reimaged), ask the user to read the new fingerprint on the Pi (${PI_CERT_COMMAND}) ` +
+        "and call trust_wlanpi_cert with it. Otherwise something else may be answering at this address: do not re-trust it.",
     );
   }
 }

@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.2.0 (2026-10-22)
+
+Fixes from a security and stability review.
+
+- Tokens from settings are only sent to Pis you named. A token without a name goes to the first Pi added and to Pis in `seed_devices`; a named token goes only to the host `seed_devices` gives that name, if any. Before, `add_wlanpi` sent the unnamed token to any host, so text in a tool result (an SSID from a Wi-Fi scan, say) could talk Claude into sending it elsewhere.
+- Tokens from settings are no longer written to `devices.json`. Copies stored by 0.1.1 are removed at startup. Settings take precedence over stored tokens, and `set_wlanpi_token` is refused for a Pi that has one in settings.
+- A changed certificate's error no longer shows the presented fingerprint, so the one given to `trust_wlanpi_cert` has to come from the user reading the Pi. Clients that support MCP elicitation also ask the user to confirm before re-pinning.
+- New `call_wlanpi_readonly_tool` runs only Pi tools marked read-only, so it can be allowed once without allowing tools such as `reboot_device`.
+- `devices.json` shared with another version: fields this version does not know are kept, and a newer format is left alone (not moved aside) and never written. When two copies find a corrupt file at once, startup no longer fails.
+- `last_seen` is kept in memory and written once on close, instead of rewriting `devices.json` every minute.
+- A Pi that returns the same list cursor forever no longer hangs the catalog fetch (at most 100 pages).
+- The bundle exits with a clear message on Node.js older than 22.19.
+- The `device` argument no longer has an enum of names, which Claude Desktop kept from startup and so rejected Pis added later.
+- CI: GitHub Actions pinned to commit SHAs, the release job alone gets write access, Dependabot added, and releases attach a SHA-256 checksum of the `.mcpb`. New `SECURITY.md` and a Security Model section in the README.
+
 ## 0.1.1 (2026-10-15)
 
 Fixes found by running 0.1.0 in Claude Desktop.

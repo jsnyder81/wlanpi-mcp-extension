@@ -138,11 +138,15 @@ function routingParamFor(kind: string, name: string, existing: readonly string[]
   return FALLBACK_ROUTING_PARAM;
 }
 
+/**
+ * No enum of device names: clients such as Claude Desktop read the tool list once, so an
+ * enum would reject Pis added later before the bridge ever saw the call. The bridge
+ * validates the name and lists the registered devices when it is wrong.
+ */
 export function routingParamSchema(registered: readonly string[]): Record<string, unknown> {
   const only = registered.length === 1 ? registered[0] : undefined;
   return {
     type: "string",
-    enum: [...registered],
     description: only
       ? `WLAN Pi to run this on. Optional: defaults to '${only}', the only registered device.`
       : `WLAN Pi to run this on: one of ${registered.join(", ")}. Use list_wlanpis to see them.`,
@@ -158,7 +162,7 @@ export function routingParamSchema(registered: readonly string[]): Record<string
  * - When not every registered device offers a tool (or definitions differ), the
  *   description ends with the devices that do.
  * - The routing argument is required with 2+ registered devices and optional (defaulting
- *   to the only one) with exactly one.
+ *   to the only one) with exactly one. Its description lists the registered devices.
  * - Tools whose names are reserved (the bridge's own management tools) are dropped.
  */
 export function mergeTools(

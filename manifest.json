@@ -2,7 +2,7 @@
   "manifest_version": "0.4",
   "name": "wlanpi-mcp-extension",
   "display_name": "WLAN Pi",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "Connect Claude to one or more WLAN Pi devices running wlanpi-mcp.",
   "long_description": "Lets Claude use your WLAN Pis for Wi-Fi diagnostics: device info, services, Wi-Fi scans, packet capture, profiler, Bluetooth and more, through each Pi's wlanpi-mcp server. Add a Pi by asking Claude, for example \"add my WLAN Pi at 10.0.0.5\". Each Pi's self-signed certificate is pinned on first use, and a changed certificate is refused until you confirm it. With several Pis, every tool takes a device argument naming the Pi to use. Runs on your computer and talks only to the Pis you add.",
   "author": {
@@ -69,6 +69,10 @@
       "description": "List the tools a WLAN Pi offers."
     },
     {
+      "name": "call_wlanpi_readonly_tool",
+      "description": "Run a read-only WLAN Pi tool by name."
+    },
+    {
       "name": "call_wlanpi_tool",
       "description": "Run any WLAN Pi tool by name."
     }
@@ -85,7 +89,7 @@
     "tokens": {
       "type": "string",
       "title": "wlanpi-core tokens",
-      "description": "Optional. One token per Pi as name=token pairs separated by commas, e.g. lab=eyJ..., field=eyJ... (names as in the list above, or as shown by list_wlanpis). With a single Pi, the token alone is enough. Get a token on each Pi with: sudo getjwt claude. Tokens here replace stored ones every time the extension starts, so to renew an expired token, paste the new one here.",
+      "description": "Optional. One token per Pi as name=token pairs separated by commas, e.g. lab=eyJ..., field=eyJ... (names as in the list above, or as shown by list_wlanpis). A token for a name listed above is only sent to that host. A token without a name is only used for the first Pi you add and for Pis listed above. Get a token on each Pi with: sudo getjwt claude. Tokens here take precedence over ones given in a conversation and are never written to disk, so to renew an expired token, paste the new one here and restart the extension.",
       "sensitive": true,
       "required": false
     },

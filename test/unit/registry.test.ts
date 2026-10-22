@@ -40,6 +40,7 @@ describe("Registry", () => {
       cert_sha256: "AB:CD",
       ca_file: null,
       token: "t",
+      default_token: false,
       added_at: FIXED.toISOString(),
       last_seen: null,
     });
@@ -186,6 +187,43 @@ describe("Registry", () => {
     await fs.chmod(registry.filePath, 0o644);
     await registry.touch("lab");
     expect((await fs.stat(registry.filePath)).mode & 0o777).toBe(0o600);
+  });
+});
+
+describe("sharing devices.json with other versions", () => {
+  it("keeps fields it does not know when it writes", async () => {
+    const registry = await open();
+    await registry.add({ name: "lab", host: "10.0.0.5" });
+    const saved = await readJson(registry.filePath);
+    saved.devices[0].future_field = "keep me";
+    saved.future_top = 1;
+    await fs.writeFile(registry.filePath, JSON.stringify(saved));
+
+    await registry.update("lab", { token: "t" });
+    expect((await readJson(registry.filePath)).devices[0]).toMatchObject({ future_field: "keep me", token: "t" });
+  });
+
+  it("leaves a newer format alone and refuses to write it", async () => {
+    const first = await open();
+    const file = first.filePath;
+    await fs.mkdir(join(dir, "config"), { recursive: true });
+    const newer = JSON.stringify({ version: 2, devices: [{ name: "lab", shape: "new" }] });
+    await fs.writeFile(file, newer);
+
+    const registry = await open();
+    expect(registry.list()).toEqual([]);
+    expect(registry.readOnlyReason).toMatch(/written by a newer version .*format 2/);
+    await expect(registry.add({ name: "field", host: "10.0.0.6" })).rejects.toThrow(/newer version/);
+    expect(await fs.readFile(file, "utf8")).toBe(newer);
+    expect(await fs.readdir(join(dir, "config"))).toEqual(["devices.json"]);
+  });
+
+  it("reads 0.1.1 records, which have no default_token", async () => {
+    const registry = await open();
+    await fs.mkdir(registry.dir, { recursive: true });
+    const old = { name: "lab", host: "10.0.0.5", port: 8767, path: "/mcp", cert_sha256: null, ca_file: null, token: null, added_at: "x", last_seen: null };
+    await fs.writeFile(registry.filePath, JSON.stringify({ version: 1, devices: [old] }));
+    expect((await open()).get("lab")).toEqual({ ...old, default_token: false });
   });
 });
 

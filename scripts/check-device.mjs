@@ -46,11 +46,11 @@ function report(ok, label, detail = "") {
 const text = (result) => result.content?.map((c) => (c.type === "text" ? c.text : `[${c.type}]`)).join("") ?? "";
 const short = (s, n = 160) => (s.length > n ? `${s.slice(0, n)}...` : s);
 
-async function start() {
+async function start(settingsToken = token) {
   const transport = new StdioClientTransport({
     command: process.execPath,
     args: [entry],
-    env: { ...getDefaultEnvironment(), WLANPI_BRIDGE_CONFIG_DIR: configDir, WLANPI_BRIDGE_LOG_LEVEL: "debug", WLANPI_BRIDGE_TOKENS: `${name}=${token}` },
+    env: { ...getDefaultEnvironment(), WLANPI_BRIDGE_CONFIG_DIR: configDir, WLANPI_BRIDGE_LOG_LEVEL: "debug", WLANPI_BRIDGE_TOKENS: `${name}=${settingsToken}` },
     stderr: "pipe",
   });
   transport.stderr?.on("data", (chunk) => (stderr += chunk.toString()));
@@ -124,13 +124,20 @@ try {
     report(false, "prompt health_check is offered", `${prompts.length} prompts: ${prompts.map((p) => p.name).join(", ")}`);
   }
 
-  // A rejected token: set a bad one, then put the real one back.
-  const bad = await call(client, "set_wlanpi_token", { device: name, token: "not-a-valid-token" });
-  report(bad.structuredContent?.status === "rejected", "a bad token is rejected by wlanpi-core", short(bad.structuredContent?.error ?? text(bad), 220));
+  // A rejected token: restart with a bad one in settings, then with the real one again.
+  await client.close();
+  client = await start("not-a-valid-token");
+  const badList = await call(client, "list_wlanpis");
+  const badDevice = badList.structuredContent?.devices?.[0];
+  report(badDevice?.token_valid === false, "a bad token is rejected by wlanpi-core", short(badDevice?.error ?? text(badList), 220));
   const rejectedCall = await call(client, "get_device_info");
-  report(rejectedCall.isError && /set_wlanpi_token/.test(text(rejectedCall)), "a tool call with the bad token explains the fix", short(text(rejectedCall), 220));
-  const good = await call(client, "set_wlanpi_token", { device: name, token });
-  report(good.structuredContent?.status === "accepted", "the real token is accepted again");
+  report(rejectedCall.isError && /sudo getjwt claude/.test(text(rejectedCall)), "a tool call with the bad token explains the fix", short(text(rejectedCall), 220));
+  await client.close();
+  client = await start();
+  const goodList = await call(client, "list_wlanpis");
+  report(goodList.structuredContent?.devices?.[0]?.token_valid === true, "the real token is accepted again");
+  const saved0 = await readFile(join(configDir, "devices.json"), "utf8");
+  report(!saved0.includes(token), "the token from settings is never written to devices.json");
 
   // A changed certificate: corrupt the stored pin, restart, and expect a refusal.
   await client.close();
@@ -140,9 +147,13 @@ try {
   await writeFile(file, JSON.stringify(saved, null, 2));
   client = await start();
   const refused = await call(client, "get_device_info");
-  report(refused.isError && text(refused).includes(`presented ${fingerprint}`), "a certificate that does not match the pin is refused", short(text(refused), 260));
+  report(
+    refused.isError && /no longer matches the pinned fingerprint/.test(text(refused)) && !text(refused).includes(fingerprint),
+    "a certificate that does not match the pin is refused, without showing the presented fingerprint",
+    short(text(refused), 260),
+  );
   const trusted = await call(client, "trust_wlanpi_cert", { device: name, fingerprint });
-  report(trusted.structuredContent?.status === "trusted", "trust_wlanpi_cert re-pins the presented certificate");
+  report(trusted.structuredContent?.status === "trusted", "trust_wlanpi_cert re-pins with the fingerprint read on the Pi");
   const after = await call(client, "get_device_info");
   report(!after.isError, "calls work again after re-pinning");
 

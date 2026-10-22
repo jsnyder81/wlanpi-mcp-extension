@@ -1,6 +1,6 @@
 {
   "name": "wlanpi-mcp-extension",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "private": true,
   "description": "Local Claude extension that connects Claude Desktop and Claude Code to one or more WLAN Pi devices running wlanpi-mcp.",
   "keywords": [

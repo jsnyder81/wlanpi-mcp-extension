@@ -46,7 +46,7 @@ describe("mergeTools", () => {
         inputSchema: {
           type: "object",
           properties: {
-            device: { type: "string", enum: ["lab"], default: "lab", description: expect.stringMatching(/Optional: defaults to 'lab'/) },
+            device: { type: "string", default: "lab", description: expect.stringMatching(/Optional: defaults to 'lab'/) },
             message: { type: "string" },
           },
           required: ["message"],
@@ -67,7 +67,7 @@ describe("mergeTools", () => {
     );
     expect(two.tools.map((t) => t.name)).toEqual(["a", "b"]);
     expect(two.tools[0]?.inputSchema.required).toEqual(["device"]);
-    expect(two.tools[0]?.inputSchema.properties?.device).toMatchObject({ enum: ["field", "lab"] });
+    expect(two.tools[0]?.inputSchema.properties?.device).toEqual({ type: "string", description: expect.stringContaining("one of field, lab") });
     expect(two.tools[0]?.description).toBe("a description");
     expect(two.routes.get("a")?.devices).toEqual(["field", "lab"]);
 
