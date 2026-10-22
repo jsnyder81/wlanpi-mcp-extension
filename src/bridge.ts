@@ -43,33 +43,32 @@ import {
   tokenRejectedMessage,
   trustFor,
 } from "./device.js";
-import { DeviceError, DuplicateDeviceError, UnknownDeviceError, ValidationError } from "./errors.js";
+import { DeviceError, DuplicateDeviceError, PI_CERT_COMMAND, UnknownDeviceError, ValidationError } from "./errors.js";
 import { type Logger, silentLogger } from "./log.js";
 import type { DeviceRecord, Registry } from "./registry.js";
 import { DEFAULT_CONNECT_TIMEOUT_MS, type PeerCert, fetchPeerCert, fingerprintsEqual, normalizeFingerprint } from "./tls.js";
-import { type TokenSettings, nameFromHost, normalizeName, parseHost, parsePort, parseSeedDevices, parseTokens } from "./validate.js";
+import { type SeedDevice, type TokenSettings, nameFromHost, normalizeName, parseHost, parsePort, parseSeedDevices, parseTokens } from "./validate.js";
 import { NAME, VERSION } from "./version.js";
 
 type Extra = RequestHandlerExtra<ServerRequest, ServerNotification>;
 type Args = Record<string, unknown>;
 
-export const PI_CERT_COMMAND = "openssl x509 -in /etc/nginx/ssl/self-signed-wlanpi.cert -noout -fingerprint -sha256";
 const TOKEN_COMMAND = "sudo getjwt claude";
-/** last_seen is written at most this often per device, not on every call. */
-const TOUCH_INTERVAL_MS = 60_000;
 /**
  * How long the first list requests wait for seeded and never-fetched Pis. Some clients
  * (Claude Desktop) read the lists once when the extension starts and ignore later
  * list_changed notifications, so tools added a few seconds later would never be seen.
  */
 export const STARTUP_WAIT_MS = 8_000;
+/** How long the user has to answer the certificate confirmation. */
+const CONFIRM_TIMEOUT_MS = 10 * 60_000;
 
 const INSTRUCTIONS = `This extension connects to one or more WLAN Pi devices running wlanpi-mcp.
 Register a Pi with add_wlanpi (hostname or IP), and show the user the certificate fingerprint it returns so they can compare it with the Pi.
 Every WLAN Pi tool takes a 'device' argument naming the Pi to run on (see list_wlanpis). With one registered Pi it is optional.
 To run the same tool on several Pis, call it once per device.
 Each Pi's resources are listed under wlanpi://<device>/..., and prompts take a 'device' argument too.
-If a Pi's tools are missing from your tool list (some clients only read it when the extension starts), use list_wlanpi_tools to see them and call_wlanpi_tool to run one.`;
+If a Pi's tools are missing from your tool list (some clients only read it when the extension starts), use list_wlanpi_tools to see them, and call_wlanpi_readonly_tool (read-only tools) or call_wlanpi_tool to run one.`;
 
 const deviceArg = { type: "string", description: "Name of a registered WLAN Pi (see list_wlanpis)." };
 
@@ -124,8 +123,8 @@ export const MANAGEMENT_TOOLS: Tool[] = [
     title: "Trust a WLAN Pi's new certificate",
     description:
       "Re-pin a WLAN Pi's TLS certificate after it legitimately changed (for example the Pi was reimaged). " +
-      "The fingerprint must be the one the Pi presents now, as the user read it on the Pi " +
-      `(${PI_CERT_COMMAND}). Never pass a fingerprint the user has not confirmed.`,
+      "The fingerprint must be the one the user read on the Pi itself " +
+      `(${PI_CERT_COMMAND}). Never pass a fingerprint that came from anywhere else. Where the client supports it, the user is also asked to confirm.`,
     inputSchema: {
       type: "object",
       properties: { device: deviceArg, fingerprint: { type: "string", description: "SHA-256 fingerprint of the Pi's current certificate, e.g. AB:CD:..." } },
@@ -149,7 +148,7 @@ export const MANAGEMENT_TOOLS: Tool[] = [
     title: "List a WLAN Pi's tools",
     description:
       "List the tools a WLAN Pi offers, with a short summary of each and whether it is read-only or destructive. Give 'tool' to get one tool's full description and input schema. " +
-      "Use this with call_wlanpi_tool when the Pi's tools are not in your tool list.",
+      "Use this with call_wlanpi_readonly_tool or call_wlanpi_tool when the Pi's tools are not in your tool list.",
     inputSchema: {
       type: "object",
       properties: {
@@ -160,10 +159,28 @@ export const MANAGEMENT_TOOLS: Tool[] = [
     annotations: { title: "List a WLAN Pi's tools", readOnlyHint: true, openWorldHint: true },
   },
   {
+    name: "call_wlanpi_readonly_tool",
+    title: "Run a read-only WLAN Pi tool",
+    description:
+      "Run a read-only tool a WLAN Pi offers (read_only: true in list_wlanpi_tools), by name, and return its result unchanged. Use it when the tool you need is not in your tool list. " +
+      "It refuses any tool that is not marked read-only; run those with call_wlanpi_tool.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        device: { ...deviceArg, description: "Name of a registered WLAN Pi. Optional when only one is registered." },
+        tool: { type: "string", description: "Name of the read-only Pi tool to run, e.g. get_device_info." },
+        arguments: { type: "object", description: "Arguments for the Pi tool, as listed in its input schema.", additionalProperties: true },
+      },
+      required: ["tool"],
+    },
+    annotations: { title: "Run a read-only WLAN Pi tool", readOnlyHint: true, openWorldHint: true },
+  },
+  {
     name: "call_wlanpi_tool",
     title: "Run a WLAN Pi tool",
     description:
       "Run any tool a WLAN Pi offers, by name, and return its result unchanged. Use it when the tool you need is not in your tool list (see list_wlanpi_tools for names and arguments). " +
+      "Prefer call_wlanpi_readonly_tool for read-only tools. " +
       "Some Pi tools change the device (for example reboot_device, stop_service): check the tool's read_only and destructive flags from list_wlanpi_tools and ask the user before running a destructive one.",
     inputSchema: {
       type: "object",
@@ -197,7 +214,11 @@ interface DeviceState {
   catalog?: DeviceCatalog;
   /** True once the catalog came from the device in this process, not from the cache. */
   live: boolean;
-  lastTouch: number;
+  /**
+   * Last successful contact in this process. Kept in memory and written to devices.json
+   * only on close, so routine calls never rewrite a file another process may be changing.
+   */
+  lastSeen?: string;
 }
 
 function ok(data: Record<string, unknown>): CallToolResult {
@@ -219,11 +240,6 @@ function optionalString(args: Args, key: string): string | undefined {
   if (value === undefined || value === null || value === "") return undefined;
   if (typeof value !== "string") throw new ValidationError(`'${key}' must be a string.`);
   return value.trim() || undefined;
-}
-
-/** The fields that, when changed, need a new connection. */
-function connectionKey(record: DeviceRecord): string {
-  return canonicalJson([record.host, record.port, record.path, record.token, record.cert_sha256, record.ca_file]);
 }
 
 function isCatalog(value: unknown): value is DeviceCatalog {
@@ -263,6 +279,7 @@ export class Bridge {
   private initialized = false;
   private refreshing = new Map<string, Promise<void>>();
   private readonly tokens: TokenSettings;
+  private readonly seeds: SeedDevice[];
   private readonly startupWaitMs: number;
   private startupReady?: Promise<void>;
   private startedAt = 0;
@@ -277,6 +294,9 @@ export class Bridge {
     this.tokens = parseTokens(this.config.tokens);
     this.tokens.default ??= this.config.defaultToken;
     for (const error of this.tokens.errors) this.logger.warn(error);
+    const seeds = parseSeedDevices(this.config.seedDevices);
+    this.seeds = seeds.devices;
+    for (const error of seeds.errors) this.logger.warn(error);
 
     this.server = new Server(
       { name: NAME, version: VERSION },
@@ -296,7 +316,8 @@ export class Bridge {
       const { name, arguments: args = {} } = request.params;
       try {
         const progressToken = request.params._meta?.progressToken;
-        if (name === "call_wlanpi_tool") return await this.callAnyPiTool(args, progressToken, extra);
+        if (name === "call_wlanpi_tool") return await this.callAnyPiTool(args, progressToken, extra, false);
+        if (name === "call_wlanpi_readonly_tool") return await this.callAnyPiTool(args, progressToken, extra, true);
         return RESERVED.has(name) ? await this.callManagementTool(name, args) : await this.callPiTool(name, args, progressToken, extra);
       } catch (err) {
         if (err instanceof ValidationError || err instanceof DeviceError || err instanceof UnknownDeviceError || err instanceof DuplicateDeviceError) {
@@ -347,12 +368,12 @@ export class Bridge {
   }
 
   /**
-   * Load the registry and cached catalogs, and apply tokens from settings. No network, so
-   * startup is instant.
+   * Load the registry and cached catalogs, and forget stored copies of tokens from
+   * settings. No network, so startup is instant.
    */
   async init(): Promise<void> {
+    await this.forgetStoredSettingsTokens();
     await this.sync();
-    await this.applyConfiguredTokens();
   }
 
   /**
@@ -381,34 +402,60 @@ export class Bridge {
     clearTimeout(timer);
   }
 
-  /** The token to use for a device that was not given one. */
-  private tokenFor(name: string): string | null {
-    return this.tokens.byName.get(name) ?? this.tokens.default ?? null;
+  private seedAt(host: string, port: number): SeedDevice | undefined {
+    return this.seeds.find((s) => s.host === host && (s.port ?? DEFAULT_PORT) === port);
   }
 
   /**
-   * Settings win over stored tokens, so renewing an expired token is: paste the new one
-   * into the settings and restart. A named token replaces that device's token. A token
-   * without a name replaces the token when exactly one Pi is registered, and otherwise
-   * only fills in Pis that have none (it cannot know which Pi it belongs to).
+   * The token from settings for a device, if settings give it one. Tokens are only sent
+   * to hosts the user named, so text Claude reads (a Wi-Fi scan can carry any SSID) cannot
+   * get a token sent elsewhere by having Claude call add_wlanpi:
+   * - a named token goes to the Pi of that name, and only to the host settings give
+   *   that name, when they give it one;
+   * - the unnamed token goes to Pis listed in settings, and to the first Pi added (the
+   *   one-Pi setup: paste the token alone, then ask Claude to add the Pi).
    */
-  private async applyConfiguredTokens(): Promise<void> {
-    const records = this.registry.list();
-    let changed = false;
-    for (const record of records) {
-      const named = this.tokens.byName.get(record.name);
-      const fallback = this.tokens.default && (records.length === 1 || !record.token) ? this.tokens.default : undefined;
-      const wanted = named ?? fallback;
-      if (!wanted || wanted === record.token) continue;
-      await this.registry.update(record.name, { token: wanted });
-      this.logger.info(`Using the token from settings for '${record.name}'.`);
-      changed = true;
+  private settingsToken(record: Pick<DeviceRecord, "name" | "host" | "port" | "default_token">): string | undefined {
+    const named = this.tokens.byName.get(record.name);
+    if (named) {
+      const seeded = this.seeds.find((s) => s.name === record.name);
+      if (!seeded || (seeded.host === record.host && (seeded.port ?? DEFAULT_PORT) === record.port)) return named;
     }
-    if (changed) await this.sync();
+    if (this.tokens.default && (record.default_token || this.seedAt(record.host, record.port))) return this.tokens.default;
+    return undefined;
+  }
+
+  /** Settings win over a stored token, so renewing is: paste the new one and restart. */
+  private tokenFor(record: DeviceRecord): string | null {
+    return this.settingsToken(record) ?? record.token;
+  }
+
+  /**
+   * Version 0.1.1 copied tokens from settings into devices.json. Clear those copies (the
+   * settings still provide them) so tokens kept in the OS keychain by Claude Desktop do
+   * not also sit in a plain file, and mark a Pi that used the unnamed token.
+   */
+  private async forgetStoredSettingsTokens(): Promise<void> {
+    for (const record of this.registry.list()) {
+      if (!record.token) continue;
+      const isDefault = record.token === this.tokens.default;
+      if (!isDefault && record.token !== this.tokens.byName.get(record.name)) continue;
+      await this.registry.update(record.name, { token: null, ...(isDefault ? { default_token: true } : {}) });
+      this.logger.info(`Removed the stored copy of the settings token for '${record.name}'.`);
+    }
+  }
+
+  /** The fields that, when changed, need a new connection. */
+  private connectionKey(record: DeviceRecord): string {
+    return canonicalJson([record.host, record.port, record.path, this.tokenFor(record), record.cert_sha256, record.ca_file]);
   }
 
   async close(): Promise<void> {
     await Promise.all([...this.states.values()].map((s) => s.connection?.close()));
+    // Write last_seen once, on the way out.
+    for (const [name, state] of this.states) {
+      if (state.lastSeen) await this.registry.update(name, { last_seen: state.lastSeen }).catch(() => {});
+    }
     await this.server.close();
   }
 
@@ -465,9 +512,9 @@ export class Bridge {
       const state = this.states.get(record.name);
       if (!state) {
         const cached = await this.registry.readCache(record.name);
-        this.states.set(record.name, { record, catalog: isCatalog(cached) ? cached : undefined, live: false, lastTouch: 0 });
+        this.states.set(record.name, { record, catalog: isCatalog(cached) ? cached : undefined, live: false });
       } else {
-        if (connectionKey(state.record) !== connectionKey(record)) {
+        if (this.connectionKey(state.record) !== this.connectionKey(record)) {
           const old = state.connection;
           state.connection = undefined;
           await old?.close();
@@ -520,24 +567,16 @@ export class Bridge {
 
   private async connectionFor(state: DeviceState): Promise<DeviceConnection> {
     if (!state.connection) {
-      const { name, host, port, path, token } = state.record;
+      const { name, host, port, path } = state.record;
       const trust = await trustFor(state.record, this.config.caFile);
-      state.connection = this.makeConnection({ name, host, port, path, token, trust });
+      state.connection = this.makeConnection({ name, host, port, path, token: this.tokenFor(state.record), trust });
     }
     return state.connection;
   }
 
   private touch(name: string): void {
     const state = this.states.get(name);
-    const now = Date.now();
-    if (!state || now - state.lastTouch < TOUCH_INTERVAL_MS) return;
-    state.lastTouch = now;
-    this.registry.touch(name).then(
-      (record) => {
-        if (this.states.get(name) === state) state.record = record;
-      },
-      (err) => this.logger.debug(`Could not record last_seen for '${name}'`, err),
-    );
+    if (state) state.lastSeen = new Date().toISOString();
   }
 
   private get connectTimeoutMs(): number {
@@ -697,7 +736,11 @@ export class Bridge {
     const nameArg = optionalString(args, "name");
     const name = nameArg ? normalizeName(nameArg) : nameFromHost(host, this.registry.names());
     if (this.registry.get(name)) throw new DuplicateDeviceError(name);
-    const token = optionalString(args, "token") ?? this.tokenFor(name);
+    const tokenArg = optionalString(args, "token");
+    // The first Pi may use the unnamed token from settings (the one-Pi setup); later Pis
+    // only get it when settings list their host. See settingsToken.
+    const defaultToken = !tokenArg && !!this.tokens.default && this.registry.names().length === 0;
+    const token = tokenArg ?? this.settingsToken({ name, host, port, default_token: defaultToken }) ?? null;
 
     // Trust on first use: read the certificate the device presents now.
     const probeTarget: DeviceTarget = { name, host, port, path: DEFAULT_PATH, token, trust: { kind: "pin", fingerprint: "00".repeat(32) } };
@@ -738,7 +781,7 @@ export class Bridge {
     }
 
     try {
-      await this.registry.add({ name, host, port, cert_sha256: caMode ? null : cert.fingerprint256, token });
+      await this.registry.add({ name, host, port, cert_sha256: caMode ? null : cert.fingerprint256, token: tokenArg ?? null, default_token: defaultToken });
     } catch (err) {
       await connection.close();
       throw err;
@@ -756,6 +799,12 @@ export class Bridge {
 
     const nextSteps = [`Ask the user to confirm the fingerprint matches the Pi. On the Pi: ${PI_CERT_COMMAND}`];
     if (tokenProblem) nextSteps.push(tokenProblem);
+    if (!token && this.tokens.default) {
+      nextSteps.push(
+        `The token in settings has no name, so it is only used for the first Pi and for Pis listed in 'WLAN Pis to add at startup'. ` +
+          `To use a token for '${name}', add it to the tokens setting as ${name}=<token> and restart the extension.`,
+      );
+    }
     if (tokenWarning) nextSteps.push(tokenWarning);
     return {
       name,
@@ -775,7 +824,8 @@ export class Bridge {
     await this.reload();
     const devices = await Promise.all(
       [...this.states.entries()].map(async ([name, state]) => {
-        const { host, port, last_seen, token, ca_file, cert_sha256 } = state.record;
+        const { host, port, last_seen, ca_file, cert_sha256 } = state.record;
+        const token = this.tokenFor(state.record);
         const base = {
           name,
           host,
@@ -783,7 +833,7 @@ export class Bridge {
           trust: ca_file || this.config.caFile ? "ca" : "pinned",
           ...(cert_sha256 && !(ca_file || this.config.caFile) ? { fingerprint_sha256: cert_sha256 } : {}),
           token_set: !!token,
-          last_seen,
+          last_seen: state.lastSeen ?? last_seen,
           tool_count: state.catalog?.tools.length ?? 0,
         };
         try {
@@ -814,6 +864,7 @@ export class Bridge {
         }
       }),
     );
+    if (this.registry.readOnlyReason) return { count: 0, devices: [], error: this.registry.readOnlyReason };
     return devices.length
       ? { count: devices.length, devices }
       : { count: 0, devices: [], hint: "No WLAN Pi is registered yet. Add one with add_wlanpi, giving its hostname or IP address." };
@@ -851,15 +902,20 @@ export class Bridge {
     } catch (err) {
       throw toDeviceError(err, { ...record, trust: { kind: "pin", fingerprint: given } }, { kind: "connect", timeoutMs: this.connectTimeoutMs }, this.connectTimeoutMs);
     }
+    // The presented fingerprint is not echoed back: it must come from the user, never from
+    // whatever answers at the Pi's address.
     if (!fingerprintsEqual(given, cert.fingerprint256)) {
       throw new ValidationError(
-        `The fingerprint given (${given}) does not match the certificate ${deviceLabel(record)} presents now (${cert.fingerprint256}). ` +
-          `Nothing was changed. Read the fingerprint on the Pi with: ${PI_CERT_COMMAND}`,
+        `The fingerprint given (${given}) does not match the certificate ${deviceLabel(record)} presents now. ` +
+          `Nothing was changed. Ask the user to read the fingerprint on the Pi with: ${PI_CERT_COMMAND}`,
       );
     }
     const previous = record.cert_sha256;
     if (previous && fingerprintsEqual(previous, cert.fingerprint256)) {
       return { name, status: "unchanged", certificate: describeCert(cert) };
+    }
+    if (!(await this.userConfirmsCert(record, cert))) {
+      return { name, status: "declined", message: "The user did not confirm the new certificate. Nothing was changed." };
     }
 
     await this.registry.update(name, { cert_sha256: cert.fingerprint256 });
@@ -878,10 +934,41 @@ export class Bridge {
     };
   }
 
+  /**
+   * Ask the user, not Claude, to confirm a new certificate, when the client supports
+   * form elicitation. Clients without it rely on the fingerprint check above, which needs
+   * a fingerprint the bridge never shows. A failed elicitation counts as a no.
+   */
+  private async userConfirmsCert(record: DeviceRecord, cert: PeerCert): Promise<boolean> {
+    const elicitation = this.server.getClientCapabilities()?.elicitation;
+    if (!elicitation || (elicitation.url && !elicitation.form)) return true;
+    try {
+      const result = await this.server.elicitInput({
+        message:
+          `Trust a new certificate for WLAN Pi ${deviceLabel(record)}? It now presents SHA-256 fingerprint ${cert.fingerprint256}. ` +
+          `Check that it matches on the Pi (${PI_CERT_COMMAND}). If it does not, something else is answering at that address.`,
+        requestedSchema: {
+          type: "object",
+          properties: { matches: { type: "boolean", title: "The fingerprint matches what the Pi shows" } },
+          required: ["matches"],
+        },
+      }, { timeout: CONFIRM_TIMEOUT_MS });
+      return result.action === "accept" && result.content?.matches === true;
+    } catch (err) {
+      this.logger.warn(`Could not ask the user to confirm the certificate for '${record.name}'`, err);
+      return false;
+    }
+  }
+
   async setToken(args: Args): Promise<Record<string, unknown>> {
     const name = requireString(args, "device").toLowerCase();
     const token = requireString(args, "token");
     await this.registry.reload();
+    if (this.settingsToken(this.registry.require(name))) {
+      throw new ValidationError(
+        `The extension's settings give '${name}' a token, which takes precedence. Put the new token in the tokens setting instead, then restart the extension.`,
+      );
+    }
     await this.registry.update(name, { token });
     await this.sync();
     try {
@@ -939,28 +1026,35 @@ export class Bridge {
     };
   }
 
-  /** call_wlanpi_tool: run any Pi tool by name, whether or not the client lists it. */
-  private async callAnyPiTool(args: Args, progressToken: string | number | undefined, extra: Extra): Promise<CallToolResult> {
+  /**
+   * call_wlanpi_tool and call_wlanpi_readonly_tool: run a Pi tool by name, whether or not
+   * the client lists it. The read-only one runs only tools the Pi marks readOnlyHint, so a
+   * user can allow it once without also allowing reboot_device.
+   */
+  private async callAnyPiTool(args: Args, progressToken: string | number | undefined, extra: Extra, readOnly: boolean): Promise<CallToolResult> {
+    const caller = readOnly ? "call_wlanpi_readonly_tool" : "call_wlanpi_tool";
     const tool = requireString(args, "tool");
     const toolArgs = args.arguments ?? {};
     if (typeof toolArgs !== "object" || Array.isArray(toolArgs) || toolArgs === null) throw new ValidationError("'arguments' must be an object of the Pi tool's arguments.");
     if (RESERVED.has(tool)) throw new ValidationError(`'${tool}' is one of the extension's own tools: call it directly.`);
 
-    const picked = this.pickDevice("call_wlanpi_tool", "device", args.device);
+    const picked = this.pickDevice(caller, "device", args.device);
     if ("error" in picked) return fail(picked.error);
     const { state, device } = picked;
-    const offers = (catalog?: DeviceCatalog) => catalog?.tools.some((t) => t.name === tool) ?? false;
-    if (!offers(state.catalog) && !state.live) await this.refreshDevice(device);
-    if (!offers(state.catalog)) {
+    const find = () => state.catalog?.tools.find((t) => t.name === tool);
+    if (!find() && !state.live) await this.refreshDevice(device);
+    const definition = find();
+    if (!definition) {
       return fail(`Device '${device}' (wlanpi-mcp ${state.catalog?.serverInfo.version ?? "version unknown"}) does not have the tool '${tool}'. See list_wlanpi_tools.`);
+    }
+    if (readOnly && definition.annotations?.readOnlyHint !== true) {
+      return fail(`'${tool}' on '${device}' is not marked read-only, so ${caller} will not run it. Use call_wlanpi_tool, after checking with the user if it changes the device.`);
     }
     return this.runPiTool(state, device, tool, toolArgs as Args, progressToken, extra);
   }
 
   private async seed(): Promise<void> {
-    const { devices, errors } = parseSeedDevices(this.config.seedDevices);
-    for (const error of errors) this.logger.warn(error);
-    for (const seed of devices) {
+    for (const seed of this.seeds) {
       const port = seed.port ?? DEFAULT_PORT;
       if (this.registry.get(seed.name) || this.registry.list().some((r) => r.host === seed.host && r.port === port)) continue;
       try {

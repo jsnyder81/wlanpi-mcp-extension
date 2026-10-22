@@ -7,7 +7,9 @@ import { DuplicateDeviceError, UnknownDeviceError, ValidationError } from "./err
 import { type Logger, silentLogger } from "./log.js";
 import { isValidName } from "./validate.js";
 
-const DeviceRecordSchema = z.object({
+// Loose objects: fields this version does not know (written by a newer copy of the
+// extension sharing the file) are kept on every write instead of being dropped.
+const DeviceRecordSchema = z.looseObject({
   name: z.string().refine(isValidName, "invalid device name"),
   host: z.string().min(1),
   port: z.number().int().min(1).max(65535),
@@ -16,20 +18,25 @@ const DeviceRecordSchema = z.object({
   cert_sha256: z.string().nullable(),
   /** Per-device CA file; when set the device is validated against it instead of pinned. */
   ca_file: z.string().nullable().default(null),
+  /** A token given with add_wlanpi or set_wlanpi_token. Tokens from settings are never stored. */
   token: z.string().nullable(),
+  /** The unnamed token from settings may be sent to this device (it was the first Pi added). */
+  default_token: z.boolean().default(false),
   added_at: z.string(),
   last_seen: z.string().nullable(),
 });
 
-const RegistryFileSchema = z.object({
-  version: z.literal(1),
+export const REGISTRY_VERSION = 1;
+
+const RegistryFileSchema = z.looseObject({
+  version: z.literal(REGISTRY_VERSION),
   devices: z.array(DeviceRecordSchema),
 });
 
 export type DeviceRecord = z.infer<typeof DeviceRecordSchema>;
 
 export type NewDevice = Pick<DeviceRecord, "name" | "host"> &
-  Partial<Pick<DeviceRecord, "port" | "path" | "cert_sha256" | "ca_file" | "token">>;
+  Partial<Pick<DeviceRecord, "port" | "path" | "cert_sha256" | "ca_file" | "token" | "default_token">>;
 
 export type DevicePatch = Partial<Omit<DeviceRecord, "name" | "added_at">>;
 
@@ -104,6 +111,8 @@ export interface RegistryOptions {
 export class Registry {
   private devices: DeviceRecord[] = [];
   private queue: Promise<unknown> = Promise.resolve();
+  /** Set while devices.json is in a newer format: nothing may be written. */
+  readOnlyReason?: string;
   private readonly logger: Logger;
   private readonly now: () => Date;
 
@@ -165,6 +174,7 @@ export class Registry {
         cert_sha256: input.cert_sha256 ?? null,
         ca_file: input.ca_file ?? null,
         token: input.token ?? null,
+        default_token: input.default_token ?? false,
         added_at: this.now().toISOString(),
         last_seen: null,
       };
@@ -250,6 +260,7 @@ export class Registry {
   private async mutate<T>(change: (devices: DeviceRecord[]) => T | Promise<T>): Promise<T> {
     return this.enqueue(async () => {
       const devices = await this.readFile();
+      if (this.readOnlyReason) throw new ValidationError(this.readOnlyReason);
       const result = await change(devices);
       devices.sort((a, b) => a.name.localeCompare(b.name));
       await this.writeFile(devices);
@@ -272,16 +283,40 @@ export class Registry {
       if ((err as NodeJS.ErrnoException).code === "ENOENT") return [];
       throw err;
     }
+    let json: unknown;
     try {
-      const parsed = RegistryFileSchema.parse(JSON.parse(text));
-      return parsed.devices.sort((a, b) => a.name.localeCompare(b.name));
+      json = JSON.parse(text);
     } catch (err) {
-      // Never silently drop a user's devices: keep the bad file for inspection.
-      const aside = `${this.filePath}.bad-${this.now().toISOString().replace(/[:.]/g, "-")}`;
-      await fs.rename(this.filePath, aside);
-      this.logger.error(`devices.json was unreadable and has been moved to ${aside}; starting with no devices.`, err instanceof Error ? err.message : err);
+      return this.moveAside(err);
+    }
+    // A newer copy of the extension (Claude Desktop and Claude Code update separately)
+    // wrote a format this one cannot read. Leave the file alone, and refuse to write it.
+    const version = (json as { version?: unknown } | null)?.version;
+    if (typeof version === "number" && version > REGISTRY_VERSION) {
+      if (!this.readOnlyReason) {
+        this.readOnlyReason = `devices.json was written by a newer version of the WLAN Pi extension (format ${version}). Update this copy of the extension to use and change your WLAN Pis.`;
+        this.logger.error(this.readOnlyReason);
+      }
       return [];
     }
+    this.readOnlyReason = undefined;
+    const parsed = RegistryFileSchema.safeParse(json);
+    if (!parsed.success) return this.moveAside(parsed.error);
+    return parsed.data.devices.sort((a, b) => a.name.localeCompare(b.name));
+  }
+
+  /** Never silently drop a user's devices: keep an unreadable file for inspection. */
+  private async moveAside(err: unknown): Promise<DeviceRecord[]> {
+    const aside = `${this.filePath}.bad-${this.now().toISOString().replace(/[:.]/g, "-")}`;
+    try {
+      await fs.rename(this.filePath, aside);
+    } catch (renameErr) {
+      // Another copy of the extension moved it first.
+      if ((renameErr as NodeJS.ErrnoException).code === "ENOENT") return [];
+      throw renameErr;
+    }
+    this.logger.error(`devices.json was unreadable and has been moved to ${aside}; starting with no devices.`, err instanceof Error ? err.message : err);
+    return [];
   }
 
   private async writeFile(devices: DeviceRecord[]): Promise<void> {

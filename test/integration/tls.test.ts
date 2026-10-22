@@ -116,7 +116,7 @@ describe("pinned dispatcher", () => {
     expect((await fetch(url(server.port))).status).toBe(200);
   });
 
-  it("refuses a different certificate before sending anything, naming both fingerprints", async () => {
+  it("refuses a different certificate before sending anything, naming only the pinned fingerprint", async () => {
     server = await startHttpsServer(otherCert);
     const fetch = createFetch(createDispatcher({ kind: "pin", fingerprint: piCert.fingerprint256 }, { device: "lab" }));
 
@@ -125,10 +125,9 @@ describe("pinned dispatcher", () => {
     expect(error).toBeInstanceOf(Error);
     const cause = (error as Error & { cause?: unknown }).cause;
     expect(cause).toBeInstanceOf(CertMismatchError);
-    expect((cause as CertMismatchError).message).toBe(
-      `Certificate for 'lab' changed. Pinned ${piCert.fingerprint256}, presented ${otherCert.fingerprint256}. ` +
-        "If this is expected (for example the Pi was reimaged), verify the new fingerprint on the Pi and call trust_wlanpi_cert.",
-    );
+    expect((cause as CertMismatchError).message).toContain(`Certificate for 'lab' changed: it no longer matches the pinned fingerprint ${piCert.fingerprint256}.`);
+    expect((cause as CertMismatchError).message).not.toContain(otherCert.fingerprint256);
+    expect((cause as CertMismatchError).presented).toBe(otherCert.fingerprint256);
     expect(server.requests).toHaveLength(0);
   });
 

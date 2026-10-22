@@ -20,10 +20,19 @@ await build({
   target: "node22",
   sourcemap: false,
   legalComments: "inline",
-  // Some bundled CommonJS dependencies call require() for Node builtins, which an ESM
-  // bundle does not provide on its own.
   banner: {
-    js: "import { createRequire as __createRequire } from 'node:module'; const require = __createRequire(import.meta.url);",
+    js: [
+      // The Claude Code plugin runs on whatever `node` is on the PATH: fail with a clear
+      // message on one older than the manifest's runtime requirement, before any bundled
+      // code runs.
+      "{ const [major, minor] = process.versions.node.split('.').map(Number);",
+      "  if (major < 22 || (major === 22 && minor < 19)) {",
+      "    process.stderr.write(`wlanpi-mcp-extension needs Node.js 22.19 or later; this is ${process.version}. Install a newer Node.js and restart Claude.\\n`);",
+      "    process.exit(1); } }",
+      // Some bundled CommonJS dependencies call require() for Node builtins, which an ESM
+      // bundle does not provide on its own.
+      "import { createRequire as __createRequire } from 'node:module'; const require = __createRequire(import.meta.url);",
+    ].join("\n"),
   },
   logLevel: "info",
 });

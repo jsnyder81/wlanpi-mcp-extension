@@ -10,7 +10,7 @@ on:
     tags: ["v*"]
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: release
@@ -19,11 +19,14 @@ concurrency:
 jobs:
   release:
     runs-on: ubuntu-latest
+    # Pushes the release branch and creates the GitHub Release.
+    permissions:
+      contents: write
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "22"
           cache: npm
@@ -46,6 +49,7 @@ jobs:
           npx mcpb unpack wlanpi-mcp-extension.mcpb build/mcpb
           WLANPI_SMOKE_DIR="$PWD/build/mcpb" npm run test:smoke
           mv wlanpi-mcp-extension.mcpb "wlanpi-mcp-extension-${VERSION}.mcpb"
+          sha256sum "wlanpi-mcp-extension-${VERSION}.mcpb" > "wlanpi-mcp-extension-${VERSION}.mcpb.sha256"
 
       - name: Assemble and smoke-test the plugin
         run: |
@@ -77,6 +81,6 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "${GITHUB_REF_NAME}" "wlanpi-mcp-extension-${VERSION}.mcpb" \
+          gh release create "${GITHUB_REF_NAME}" "wlanpi-mcp-extension-${VERSION}.mcpb" "wlanpi-mcp-extension-${VERSION}.mcpb.sha256" \
             --title "${GITHUB_REF_NAME}" \
             --notes "Claude Desktop: download wlanpi-mcp-extension-${VERSION}.mcpb and open it. Claude Code: /plugin marketplace add jsnyder81/wlanpi-mcp-extension, then /plugin install wlanpi-mcp-extension@wlanpi. See CHANGELOG.md for changes."

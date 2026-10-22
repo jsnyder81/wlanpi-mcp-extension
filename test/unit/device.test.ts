@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { StreamableHTTPError } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { ErrorCode, McpError } from "@modelcontextprotocol/sdk/types.js";
 import { describe, expect, it } from "vitest";
-import { BACKOFF_MAX_MS, type DeviceTarget, backoffDelay, deviceLabel, deviceUrl, toDeviceError, trustFor } from "../../src/device.js";
+import { BACKOFF_MAX_MS, type DeviceTarget, MAX_LIST_PAGES, allPages, backoffDelay, deviceLabel, deviceUrl, toDeviceError, trustFor } from "../../src/device.js";
 import { CertMismatchError, DeviceError } from "../../src/errors.js";
 
 const PIN = "AB:CD:EF:01:23:45:67:89:AB:CD:EF:01:23:45:67:89:AB:CD:EF:01:23:45:67:89:AB:CD:EF:01:23:45:67:89";
@@ -132,5 +132,19 @@ describe("trustFor", () => {
   it("explains a missing CA file or a missing pin", async () => {
     await expect(trustFor({ name: "lab", ca_file: "/nope/ca.pem", cert_sha256: null })).rejects.toThrow(/Cannot read the CA file for 'lab' \(\/nope\/ca\.pem\)/);
     await expect(trustFor({ name: "lab", ca_file: null, cert_sha256: null })).rejects.toThrow(/has no pinned certificate/);
+  });
+});
+
+describe("allPages", () => {
+  it("follows cursors to the end", async () => {
+    const pages: Record<string, { items: number[]; nextCursor?: string }> = { "": { items: [1], nextCursor: "a" }, a: { items: [2], nextCursor: "b" }, b: { items: [3] } };
+    expect(await allPages(async (params) => pages[params?.cursor ?? ""]!, (p) => p.items)).toEqual([1, 2, 3]);
+  });
+
+  it("stops on a repeated cursor or after MAX_LIST_PAGES", async () => {
+    expect(await allPages(async () => ({ items: [1], nextCursor: "same" }), (p) => p.items)).toEqual([1, 1]);
+    let n = 0;
+    const items = await allPages(async () => ({ items: [n], nextCursor: String(n++) }), (p) => p.items);
+    expect(items).toHaveLength(MAX_LIST_PAGES);
   });
 });

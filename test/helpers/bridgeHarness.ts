@@ -5,6 +5,8 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import {
   type CallToolResult,
+  ElicitRequestSchema,
+  type ElicitResult,
   PromptListChangedNotificationSchema,
   ResourceListChangedNotificationSchema,
   ToolListChangedNotificationSchema,
@@ -50,11 +52,16 @@ export function useBridgeHarness() {
     return mock;
   }
 
-  async function harness(config: Partial<BridgeOptions["config"]> = {}, options: Pick<BridgeOptions, "startupWaitMs"> = {}): Promise<Harness> {
+  /** `elicit` makes the client support form elicitation, answering with it. */
+  async function harness(
+    config: Partial<BridgeOptions["config"]> = {},
+    { elicit, ...options }: Pick<BridgeOptions, "startupWaitMs"> & { elicit?: (message: string) => ElicitResult } = {},
+  ): Promise<Harness> {
     const registry = await Registry.open(dir);
     const bridge = new Bridge({ registry, config: { callTimeoutMs: 10_000, ...config }, connectionOptions: { connectTimeoutMs: 2000 }, ...options });
     await bridge.init();
-    const client = new Client({ name: "test", version: "0.0.0" });
+    const client = new Client({ name: "test", version: "0.0.0" }, elicit ? { capabilities: { elicitation: { form: {} } } } : {});
+    if (elicit) client.setRequestHandler(ElicitRequestSchema, (request) => elicit(request.params.message));
     const changes = { tools: 0, resources: 0, prompts: 0 };
     client.setNotificationHandler(ToolListChangedNotificationSchema, () => void changes.tools++);
     client.setNotificationHandler(ResourceListChangedNotificationSchema, () => void changes.resources++);

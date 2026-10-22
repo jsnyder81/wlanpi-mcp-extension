@@ -225,6 +225,27 @@ export function toDeviceError(err: unknown, target: DeviceTarget, op: Operation,
   return make("protocol", `Unexpected error talking to ${label}: ${message || String(err)}`);
 }
 
+/** More list pages than any real Pi serves; a server past it is looping. */
+export const MAX_LIST_PAGES = 100;
+
+/** Follow nextCursor through a paginated list, stopping on a repeated cursor or MAX_LIST_PAGES. */
+export async function allPages<P extends { nextCursor?: string }, T>(
+  fetchPage: (params: { cursor: string } | undefined) => Promise<P>,
+  itemsOf: (page: P) => T[],
+): Promise<T[]> {
+  const items: T[] = [];
+  const seen = new Set<string>();
+  let cursor: string | undefined;
+  for (let pages = 0; pages < MAX_LIST_PAGES; pages++) {
+    const page = await fetchPage(cursor ? { cursor } : undefined);
+    items.push(...itemsOf(page));
+    cursor = page.nextCursor;
+    if (!cursor || seen.has(cursor)) break;
+    seen.add(cursor);
+  }
+  return items;
+}
+
 /** Failures that mean "the device is not there right now", which start the backoff. */
 const BACKOFF_KINDS: ReadonlySet<DeviceErrorKind> = new Set(["unreachable", "protocol"]);
 
@@ -341,6 +362,8 @@ export class DeviceConnection {
    */
   private recordFailure(error: DeviceError, connecting: boolean): DeviceError {
     this.lastError = error;
+    const mismatch = causes(error).find((e): e is CertMismatchError => e instanceof CertMismatchError);
+    if (mismatch) this.logger.warn(`${this.label} presented certificate ${mismatch.presented}.`);
     if (connecting && BACKOFF_KINDS.has(error.kind)) {
       this.failures++;
       const delay = backoffDelay(this.failures, this.random);
@@ -390,35 +413,12 @@ export class DeviceConnection {
       const resourceTemplates: ResourceTemplate[] = [];
       const prompts: Prompt[] = [];
 
-      if (capabilities.tools) {
-        let cursor: string | undefined;
-        do {
-          const page = await client.listTools(cursor ? { cursor } : undefined, options);
-          tools.push(...page.tools);
-          cursor = page.nextCursor;
-        } while (cursor);
-      }
+      if (capabilities.tools) tools.push(...(await allPages((params) => client.listTools(params, options), (p) => p.tools)));
       if (capabilities.resources) {
-        let cursor: string | undefined;
-        do {
-          const page = await client.listResources(cursor ? { cursor } : undefined, options);
-          resources.push(...page.resources);
-          cursor = page.nextCursor;
-        } while (cursor);
-        do {
-          const page = await client.listResourceTemplates(cursor ? { cursor } : undefined, options);
-          resourceTemplates.push(...page.resourceTemplates);
-          cursor = page.nextCursor;
-        } while (cursor);
+        resources.push(...(await allPages((params) => client.listResources(params, options), (p) => p.resources)));
+        resourceTemplates.push(...(await allPages((params) => client.listResourceTemplates(params, options), (p) => p.resourceTemplates)));
       }
-      if (capabilities.prompts) {
-        let cursor: string | undefined;
-        do {
-          const page = await client.listPrompts(cursor ? { cursor } : undefined, options);
-          prompts.push(...page.prompts);
-          cursor = page.nextCursor;
-        } while (cursor);
-      }
+      if (capabilities.prompts) prompts.push(...(await allPages((params) => client.listPrompts(params, options), (p) => p.prompts)));
 
       return {
         serverInfo: this.info ?? { name: "unknown", version: "0" },
